@@ -1,0 +1,427 @@
+#define _GNU_SOURCE
+#include <sys/mman.h>
+#include <sys/epoll.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <getopt.h>
+#include <errno.h>
+#include <time.h>
+#include "core/lb_types.h"
+#include "core/common.h"
+
+static loadbalancer_t* global_lb = NULL;
+
+// Forward declarations for static functions
+static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm);
+static void main_lb_destroy(loadbalancer_t* lb);
+static int main_lb_start(loadbalancer_t* lb);
+static void main_lb_stop(loadbalancer_t* lb);
+static int main_lb_add_backend(loadbalancer_t* lb, const char* host, uint16_t port, uint32_t weight);
+
+// Global variables (extern declaration only - defined in proxy.c)
+extern struct proxy *proxies_list;
+time_t start_time;
+uint32_t total_connections = 0;
+volatile unsigned int now_ms = 0;
+
+struct global global = {
+    .maxconn = 100000,
+    .nbproc = 1,
+    .nbthread = 8,
+    .daemon = 0,
+    .debug = 0
+};
+
+static void signal_handler(int sig) {
+    if (global_lb) {
+        printf("\nShutting down...\n");
+        main_lb_stop(global_lb);
+        main_lb_destroy(global_lb);
+        exit(0);
+    }
+}
+
+static void print_usage(const char* prog) {
+    printf("Usage: %s [OPTIONS]\n", prog);
+    printf("Options:\n");
+    printf("  -p, --port PORT          Listen port (default: 8080)\n");
+    printf("  -a, --algorithm ALGO     Load balancing algorithm:\n");
+    printf("                           round-robin (default)\n");
+    printf("                           least-conn\n");
+    printf("                           ip-hash\n");
+    printf("                           weighted\n");
+    printf("                           response-time\n");
+    printf("  -b, --backend HOST:PORT  Add backend server (can specify multiple)\n");
+    printf("  -w, --workers NUM        Number of worker threads (default: CPU*2)\n");
+    printf("  -h, --help              Show this help message\n");
+    printf("\nExample:\n");
+    printf("  %s -p 8080 -a least-conn -b 127.0.0.1:8001 -b 127.0.0.1:8002\n", prog);
+}
+
+static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
+    loadbalancer_t* lb = calloc(1, sizeof(loadbalancer_t));
+    if (!lb) return NULL;
+
+    lb->port = port;
+    lb->algorithm = algorithm;
+    lb->running = false;
+    lb->worker_threads = sysconf(_SC_NPROCESSORS_ONLN) * 2;
+
+    pthread_spin_init(&lb->conn_pool_lock, PTHREAD_PROCESS_PRIVATE);
+
+    lb->config.connect_timeout_ms = 5000;
+    lb->config.read_timeout_ms = 30000;
+    lb->config.write_timeout_ms = 30000;
+    lb->config.keepalive_timeout_ms = 60000;
+    lb->config.health_check_interval_ms = 5000;
+    lb->config.max_connections = MAX_CONNECTIONS;
+    lb->config.tcp_nodelay = true;
+    lb->config.so_reuseport = true;
+    lb->config.defer_accept = true;
+
+    lb->epfd = epoll_create1(EPOLL_CLOEXEC);
+    if (lb->epfd < 0) {
+        free(lb);
+        return NULL;
+    }
+
+    // Initialize memory pool
+    size_t pool_size = 256 * 1024 * 1024; // 256MB
+    lb->memory_pool = mmap(NULL, pool_size, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (lb->memory_pool == MAP_FAILED) {
+        close(lb->epfd);
+        free(lb);
+        return NULL;
+    }
+
+    return lb;
+}
+
+static void main_lb_destroy(loadbalancer_t* lb) {
+    if (!lb) return;
+
+    for (uint32_t i = 0; i < lb->backend_count; i++) {
+        if (lb->backends[i]) {
+            pthread_spin_destroy(&lb->backends[i]->lock);
+            free(lb->backends[i]);
+        }
+    }
+
+    if (lb->memory_pool && lb->memory_pool != MAP_FAILED) {
+        munmap(lb->memory_pool, 256 * 1024 * 1024);
+    }
+
+    if (lb->epfd >= 0) close(lb->epfd);
+    pthread_spin_destroy(&lb->conn_pool_lock);
+
+    free(lb->workers);
+    free(lb);
+}
+
+static int main_lb_add_backend(loadbalancer_t* lb, const char* host, uint16_t port, uint32_t weight) {
+    if (lb->backend_count >= MAX_BACKENDS) return -1;
+
+    backend_t* backend = calloc(1, sizeof(backend_t));
+    if (!backend) return -1;
+
+    strncpy(backend->host, host, sizeof(backend->host) - 1);
+    backend->port = port;
+    backend->weight = weight ? weight : 1;
+    backend->state = BACKEND_DOWN;
+    backend->sockfd = -1;
+
+    pthread_spin_init(&backend->lock, PTHREAD_PROCESS_PRIVATE);
+
+    lb->backends[lb->backend_count++] = backend;
+
+    return 0;
+}
+
+// Forward declaration - defined in lb_core.c
+extern int create_listen_socket(uint16_t port, bool reuseport);
+
+static backend_t* main_lb_select_backend(loadbalancer_t* lb, struct sockaddr_in* client_addr) {
+    backend_t* selected = NULL;
+    uint32_t min_conns = UINT32_MAX;
+
+    switch (lb->algorithm) {
+        case LB_ALGO_ROUNDROBIN: {
+            uint32_t attempts = 0;
+            while (attempts < lb->backend_count) {
+                uint32_t idx = atomic_fetch_add(&lb->round_robin_idx, 1) % lb->backend_count;
+                backend_t* b = lb->backends[idx];
+                if (b && atomic_load(&b->state) == BACKEND_UP) {
+                    return b;
+                }
+                attempts++;
+            }
+            break;
+        }
+
+        case LB_ALGO_LEASTCONN: {
+            for (uint32_t i = 0; i < lb->backend_count; i++) {
+                backend_t* b = lb->backends[i];
+                if (b && atomic_load(&b->state) == BACKEND_UP) {
+                    uint32_t conns = atomic_load(&b->active_conns);
+                    if (conns < min_conns) {
+                        min_conns = conns;
+                        selected = b;
+                    }
+                }
+            }
+            break;
+        }
+
+        default:
+            // Default to round-robin
+            return lb->backends[lb->round_robin_idx++ % lb->backend_count];
+    }
+
+    return selected;
+}
+
+static void* worker_thread(void* arg) {
+    loadbalancer_t* lb = (loadbalancer_t*)arg;
+    struct epoll_event events[MAX_EVENTS];
+
+    while (lb->running) {
+        int nfds = epoll_wait(lb->epfd, events, MAX_EVENTS, 100);
+
+        for (int i = 0; i < nfds; i++) {
+            if (events[i].data.fd == lb->listen_fd) {
+                // Accept new connection
+                struct sockaddr_in client_addr;
+                socklen_t addr_len = sizeof(client_addr);
+
+                int client_fd = accept4(lb->listen_fd, (struct sockaddr*)&client_addr,
+                                       &addr_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+
+                if (client_fd < 0) continue;
+
+                atomic_fetch_add(&lb->global_stats.total_requests, 1);
+
+                // Simple implementation - just close for now
+                // In real implementation, would handle the connection
+                close(client_fd);
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static int main_lb_start(loadbalancer_t* lb) {
+    if (!lb || lb->running) return -1;
+
+    lb->listen_fd = create_listen_socket(lb->port, lb->config.so_reuseport);
+    if (lb->listen_fd < 0) {
+        perror("Failed to create listen socket");
+        return -1;
+    }
+
+    struct epoll_event ev = {
+        .events = EPOLLIN,
+        .data.fd = lb->listen_fd
+    };
+
+    if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, lb->listen_fd, &ev) < 0) {
+        close(lb->listen_fd);
+        return -1;
+    }
+
+    lb->running = true;
+
+    // Start all backends as UP for testing
+    for (uint32_t i = 0; i < lb->backend_count; i++) {
+        lb->backends[i]->state = BACKEND_UP;
+    }
+
+    lb->workers = calloc(lb->worker_threads, sizeof(pthread_t));
+    if (!lb->workers) {
+        close(lb->listen_fd);
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < lb->worker_threads; i++) {
+        if (pthread_create(&lb->workers[i], NULL, worker_thread, lb) != 0) {
+            lb->running = false;
+            for (uint32_t j = 0; j < i; j++) {
+                pthread_join(lb->workers[j], NULL);
+            }
+            free(lb->workers);
+            close(lb->listen_fd);
+            return -1;
+        }
+    }
+
+    printf("Load balancer started on port %u with %u workers\n", lb->port, lb->worker_threads);
+    printf("Algorithm: ");
+    switch (lb->algorithm) {
+        case LB_ALGO_ROUNDROBIN: printf("Round Robin\n"); break;
+        case LB_ALGO_LEASTCONN: printf("Least Connections\n"); break;
+        case LB_ALGO_SOURCE: printf("IP Hash\n"); break;
+        case LB_ALGO_STICKY: printf("Weighted\n"); break;
+        default: printf("Unknown\n");
+    }
+
+    return 0;
+}
+
+static void main_lb_stop(loadbalancer_t* lb) {
+    if (!lb || !lb->running) return;
+
+    lb->running = false;
+
+    if (lb->workers) {
+        for (uint32_t i = 0; i < lb->worker_threads; i++) {
+            pthread_join(lb->workers[i], NULL);
+        }
+    }
+
+    if (lb->listen_fd >= 0) {
+        close(lb->listen_fd);
+    }
+
+    printf("Load balancer stopped\n");
+}
+
+int main(int argc, char** argv) {
+    uint16_t port = 8080;
+    lb_algorithm_t algorithm = LB_ALGO_ROUNDROBIN;
+    struct {
+        char host[256];
+        uint16_t port;
+        uint32_t weight;
+    } backends[MAX_BACKENDS];
+    int backend_count = 0;
+    uint32_t workers = 0;
+
+    static struct option long_options[] = {
+        {"port", required_argument, 0, 'p'},
+        {"algorithm", required_argument, 0, 'a'},
+        {"backend", required_argument, 0, 'b'},
+        {"workers", required_argument, 0, 'w'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "p:a:b:w:h", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'p':
+                port = atoi(optarg);
+                break;
+
+            case 'a':
+                if (strcmp(optarg, "round-robin") == 0) {
+                    algorithm = LB_ALGO_ROUNDROBIN;
+                } else if (strcmp(optarg, "least-conn") == 0) {
+                    algorithm = LB_ALGO_LEASTCONN;
+                } else if (strcmp(optarg, "ip-hash") == 0) {
+                    algorithm = LB_ALGO_SOURCE;
+                } else if (strcmp(optarg, "weighted") == 0) {
+                    algorithm = LB_ALGO_STICKY;
+                } else if (strcmp(optarg, "response-time") == 0) {
+                    algorithm = LB_ALGO_RANDOM;
+                } else {
+                    fprintf(stderr, "Unknown algorithm: %s\n", optarg);
+                    exit(1);
+                }
+                break;
+
+            case 'b': {
+                if (backend_count >= MAX_BACKENDS) {
+                    fprintf(stderr, "Too many backends (max %d)\n", MAX_BACKENDS);
+                    exit(1);
+                }
+
+                char* colon = strchr(optarg, ':');
+                if (!colon) {
+                    fprintf(stderr, "Invalid backend format: %s (expected HOST:PORT)\n", optarg);
+                    exit(1);
+                }
+
+                *colon = '\0';
+                strncpy(backends[backend_count].host, optarg, 255);
+                backends[backend_count].port = atoi(colon + 1);
+                backends[backend_count].weight = 1;
+
+                char* at = strchr(colon + 1, '@');
+                if (at) {
+                    backends[backend_count].weight = atoi(at + 1);
+                }
+
+                backend_count++;
+                break;
+            }
+
+            case 'w':
+                workers = atoi(optarg);
+                break;
+
+            case 'h':
+                print_usage(argv[0]);
+                exit(0);
+
+            default:
+                print_usage(argv[0]);
+                exit(1);
+        }
+    }
+
+    if (backend_count == 0) {
+        backends[0] = (typeof(backends[0])){"127.0.0.1", 8001, 1};
+        backends[1] = (typeof(backends[0])){"127.0.0.1", 8002, 1};
+        backends[2] = (typeof(backends[0])){"127.0.0.1", 8003, 1};
+        backend_count = 3;
+        printf("No backends specified, using defaults: 127.0.0.1:8001-8003\n");
+    }
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGPIPE, SIG_IGN);
+
+    start_time = time(NULL);
+
+    global_lb = main_lb_create(port, algorithm);
+    if (!global_lb) {
+        fprintf(stderr, "Failed to create load balancer\n");
+        exit(1);
+    }
+
+    if (workers > 0) {
+        global_lb->worker_threads = workers;
+    }
+
+    for (int i = 0; i < backend_count; i++) {
+        if (main_lb_add_backend(global_lb, backends[i].host, backends[i].port,
+                          backends[i].weight) < 0) {
+            fprintf(stderr, "Failed to add backend %s:%u\n",
+                   backends[i].host, backends[i].port);
+        } else {
+            printf("Added backend: %s:%u (weight: %u)\n",
+                   backends[i].host, backends[i].port, backends[i].weight);
+        }
+    }
+
+    if (main_lb_start(global_lb) < 0) {
+        fprintf(stderr, "Failed to start load balancer\n");
+        main_lb_destroy(global_lb);
+        exit(1);
+    }
+
+    while (global_lb->running) {
+        sleep(1);
+        now_ms += 1000; // Update time
+    }
+
+    main_lb_destroy(global_lb);
+    return 0;
+}
