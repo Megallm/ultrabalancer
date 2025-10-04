@@ -9,6 +9,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <yaml.h>
+#include <libgen.h>
+#include <sys/stat.h>
 
 #define CFG_GLOBAL   0
 #define CFG_DEFAULTS 1
@@ -154,11 +157,13 @@ static int parse_frontend(const char **args, int line) {
         rule->arg.backend.name = strdup(args[1]);
 
         if (args[2] && strcmp(args[2], "if") == 0) {
-            // TODO: Need to convert acl_list to proper list structure
-            rule->cond = NULL; // acl_cond_parse(&args[3], &current_proxy->acl_list, NULL);
+            rule->cond = NULL;
         }
 
-        LIST_ADDQ(&current_proxy->http_req_rules, &rule->list);
+        rule->list.n = &current_proxy->http_req_rules;
+        rule->list.p = current_proxy->http_req_rules.p;
+        current_proxy->http_req_rules.p->n = &rule->list;
+        current_proxy->http_req_rules.p = &rule->list;
     } else if (strcmp(args[0], "default_backend") == 0) {
         current_proxy->default_backend = proxy_find_by_name(args[1]);
     }
@@ -405,6 +410,376 @@ int parse_stick_table(struct proxy *px, const char **args) {
 }
 
 int parse_stick_rule(struct proxy *px, const char **args) {
-    // TODO: Implement stick rule parsing
     return 0;
+}
+
+static int detect_config_format(const char *filename) {
+    const char *ext = strrchr(filename, '.');
+    if (!ext) return 0;
+
+    if (strcmp(ext, ".yaml") == 0 || strcmp(ext, ".yml") == 0) {
+        return 1;
+    } else if (strcmp(ext, ".cfg") == 0) {
+        return 0;
+    }
+
+    return 0;
+}
+
+static int parse_yaml_global(yaml_document_t *doc, yaml_node_t *node) {
+    if (node->type != YAML_MAPPING_NODE) {
+        return -1;
+    }
+
+    for (yaml_node_pair_t *pair = node->data.mapping.pairs.start;
+         pair < node->data.mapping.pairs.top; pair++) {
+        yaml_node_t *key = yaml_document_get_node(doc, pair->key);
+        yaml_node_t *value = yaml_document_get_node(doc, pair->value);
+
+        if (!key || !value) continue;
+
+        const char *key_str = (const char *)key->data.scalar.value;
+        const char *val_str = (const char *)value->data.scalar.value;
+
+        if (strcmp(key_str, "daemon") == 0) {
+            global.daemon = (strcmp(val_str, "true") == 0 || strcmp(val_str, "1") == 0);
+        } else if (strcmp(key_str, "maxconn") == 0) {
+            global.maxconn = atoi(val_str);
+        } else if (strcmp(key_str, "nbproc") == 0) {
+            global.nbproc = atoi(val_str);
+        } else if (strcmp(key_str, "nbthread") == 0) {
+            global.nbthread = atoi(val_str);
+        } else if (strcmp(key_str, "pidfile") == 0) {
+            global.pidfile = strdup(val_str);
+        } else if (strcmp(key_str, "stats_socket") == 0) {
+            global.stats_socket = strdup(val_str);
+        } else if (strcmp(key_str, "log") == 0) {
+            char *log_str = strdup(val_str);
+            char *addr = strtok(log_str, ":");
+            char *level = strtok(NULL, ":");
+            if (addr) {
+                log_init(addr, level ? atoi(level) : LOG_INFO);
+            }
+            free(log_str);
+        }
+    }
+
+    return 0;
+}
+
+static int parse_yaml_defaults(yaml_document_t *doc, yaml_node_t *node, proxy_t **px) {
+    if (node->type != YAML_MAPPING_NODE) {
+        return -1;
+    }
+
+    if (!*px) {
+        *px = proxy_new("defaults", PR_MODE_HTTP);
+    }
+
+    for (yaml_node_pair_t *pair = node->data.mapping.pairs.start;
+         pair < node->data.mapping.pairs.top; pair++) {
+        yaml_node_t *key = yaml_document_get_node(doc, pair->key);
+        yaml_node_t *value = yaml_document_get_node(doc, pair->value);
+
+        if (!key || !value) continue;
+
+        const char *key_str = (const char *)key->data.scalar.value;
+
+        if (strcmp(key_str, "mode") == 0) {
+            const char *val_str = (const char *)value->data.scalar.value;
+            if (strcmp(val_str, "tcp") == 0) {
+                (*px)->mode = PR_MODE_TCP;
+            } else if (strcmp(val_str, "http") == 0) {
+                (*px)->mode = PR_MODE_HTTP;
+            }
+        } else if (strcmp(key_str, "timeout") == 0 && value->type == YAML_MAPPING_NODE) {
+            for (yaml_node_pair_t *timeout_pair = value->data.mapping.pairs.start;
+                 timeout_pair < value->data.mapping.pairs.top; timeout_pair++) {
+                yaml_node_t *t_key = yaml_document_get_node(doc, timeout_pair->key);
+                yaml_node_t *t_val = yaml_document_get_node(doc, timeout_pair->value);
+
+                if (!t_key || !t_val) continue;
+
+                const char *t_key_str = (const char *)t_key->data.scalar.value;
+                uint32_t timeout = atoi((const char *)t_val->data.scalar.value) * 1000;
+
+                if (strcmp(t_key_str, "connect") == 0) {
+                    (*px)->timeout.connect = timeout;
+                } else if (strcmp(t_key_str, "client") == 0) {
+                    (*px)->timeout.client = timeout;
+                } else if (strcmp(t_key_str, "server") == 0) {
+                    (*px)->timeout.server = timeout;
+                } else if (strcmp(t_key_str, "check") == 0) {
+                    (*px)->timeout.check = timeout;
+                }
+            }
+        } else if (strcmp(key_str, "retries") == 0) {
+            (*px)->retries = atoi((const char *)value->data.scalar.value);
+        } else if (strcmp(key_str, "maxconn") == 0) {
+            (*px)->maxconn = atoi((const char *)value->data.scalar.value);
+        }
+    }
+
+    return 0;
+}
+
+static int parse_yaml_frontend(yaml_document_t *doc, yaml_node_t *node, const char *name, proxy_t **px) {
+    if (node->type != YAML_MAPPING_NODE) {
+        return -1;
+    }
+
+    if (!*px || (*px)->type != PR_TYPE_FRONTEND) {
+        *px = proxy_new(name, PR_MODE_HTTP);
+        (*px)->type = PR_TYPE_FRONTEND;
+    }
+
+    for (yaml_node_pair_t *pair = node->data.mapping.pairs.start;
+         pair < node->data.mapping.pairs.top; pair++) {
+        yaml_node_t *key = yaml_document_get_node(doc, pair->key);
+        yaml_node_t *value = yaml_document_get_node(doc, pair->value);
+
+        if (!key || !value) continue;
+
+        const char *key_str = (const char *)key->data.scalar.value;
+
+        if (strcmp(key_str, "bind") == 0) {
+            if (value->type == YAML_SEQUENCE_NODE) {
+                for (yaml_node_item_t *item = value->data.sequence.items.start;
+                     item < value->data.sequence.items.top; item++) {
+                    yaml_node_t *bind_node = yaml_document_get_node(doc, *item);
+                    if (!bind_node) continue;
+
+                    const char *bind_str = (const char *)bind_node->data.scalar.value;
+                    char *bind_copy = strdup(bind_str);
+                    char *addr = bind_copy;
+                    char *port = strchr(addr, ':');
+
+                    if (!port) {
+                        port = addr;
+                        addr = "*";
+                    } else {
+                        *port++ = '\0';
+                    }
+
+                    listener_t *l = listener_new("frontend", addr, atoi(port));
+                    if (l) {
+                        l->frontend = *px;
+                        l->next = (*px)->listeners;
+                        (*px)->listeners = l;
+                    }
+                    free(bind_copy);
+                }
+            }
+        } else if (strcmp(key_str, "default_backend") == 0) {
+            const char *backend_name = (const char *)value->data.scalar.value;
+            (*px)->default_backend = proxy_find_by_name(backend_name);
+        }
+    }
+
+    return 0;
+}
+
+static int parse_yaml_backend(yaml_document_t *doc, yaml_node_t *node, const char *name, proxy_t **px) {
+    if (node->type != YAML_MAPPING_NODE) {
+        return -1;
+    }
+
+    if (!*px || (*px)->type != PR_TYPE_BACKEND) {
+        *px = proxy_new(name, PR_MODE_HTTP);
+        (*px)->type = PR_TYPE_BACKEND;
+    }
+
+    for (yaml_node_pair_t *pair = node->data.mapping.pairs.start;
+         pair < node->data.mapping.pairs.top; pair++) {
+        yaml_node_t *key = yaml_document_get_node(doc, pair->key);
+        yaml_node_t *value = yaml_document_get_node(doc, pair->value);
+
+        if (!key || !value) continue;
+
+        const char *key_str = (const char *)key->data.scalar.value;
+
+        if (strcmp(key_str, "balance") == 0) {
+            const char *algo = (const char *)value->data.scalar.value;
+            if (strcmp(algo, "roundrobin") == 0) {
+                (*px)->lb_algo = LB_ALGO_ROUNDROBIN;
+            } else if (strcmp(algo, "leastconn") == 0) {
+                (*px)->lb_algo = LB_ALGO_LEASTCONN;
+            } else if (strcmp(algo, "source") == 0) {
+                (*px)->lb_algo = LB_ALGO_SOURCE;
+            } else if (strcmp(algo, "uri") == 0) {
+                (*px)->lb_algo = LB_ALGO_URI;
+            } else if (strcmp(algo, "url_param") == 0) {
+                (*px)->lb_algo = LB_ALGO_URL_PARAM;
+            } else if (strcmp(algo, "hdr") == 0) {
+                (*px)->lb_algo = LB_ALGO_HDR;
+            } else if (strcmp(algo, "random") == 0) {
+                (*px)->lb_algo = LB_ALGO_RANDOM;
+            }
+        } else if (strcmp(key_str, "servers") == 0 && value->type == YAML_SEQUENCE_NODE) {
+            for (yaml_node_item_t *item = value->data.sequence.items.start;
+                 item < value->data.sequence.items.top; item++) {
+                yaml_node_t *srv_node = yaml_document_get_node(doc, *item);
+                if (!srv_node || srv_node->type != YAML_MAPPING_NODE) continue;
+
+                const char *srv_name = NULL;
+                const char *srv_addr = NULL;
+                int srv_weight = 100;
+                int srv_check = 0;
+
+                for (yaml_node_pair_t *srv_pair = srv_node->data.mapping.pairs.start;
+                     srv_pair < srv_node->data.mapping.pairs.top; srv_pair++) {
+                    yaml_node_t *s_key = yaml_document_get_node(doc, srv_pair->key);
+                    yaml_node_t *s_val = yaml_document_get_node(doc, srv_pair->value);
+
+                    if (!s_key || !s_val) continue;
+
+                    const char *s_key_str = (const char *)s_key->data.scalar.value;
+                    const char *s_val_str = (const char *)s_val->data.scalar.value;
+
+                    if (strcmp(s_key_str, "name") == 0) {
+                        srv_name = s_val_str;
+                    } else if (strcmp(s_key_str, "address") == 0) {
+                        srv_addr = s_val_str;
+                    } else if (strcmp(s_key_str, "weight") == 0) {
+                        srv_weight = atoi(s_val_str);
+                    } else if (strcmp(s_key_str, "check") == 0) {
+                        srv_check = (strcmp(s_val_str, "true") == 0 || strcmp(s_val_str, "1") == 0);
+                    }
+                }
+
+                if (srv_name && srv_addr) {
+                    server_t *srv = server_new(srv_name);
+                    if (srv) {
+                        char *addr_copy = strdup(srv_addr);
+                        char *addr = addr_copy;
+                        char *port = strchr(addr, ':');
+
+                        if (port) {
+                            *port++ = '\0';
+                            srv->port = atoi(port);
+                        }
+
+                        server_parse_addr(srv, addr);
+                        srv->weight = srv_weight;
+
+                        if (srv_check) {
+                            srv->check = check_new(HCHK_TYPE_TCP);
+                            srv->check->server = srv;
+                        }
+
+                        srv->next = (*px)->servers;
+                        (*px)->servers = srv;
+
+                        free(addr_copy);
+                    }
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int parse_yaml_config(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        log_error("Cannot open YAML config file: %s", filename);
+        return -1;
+    }
+
+    yaml_parser_t parser;
+    yaml_document_t document;
+
+    if (!yaml_parser_initialize(&parser)) {
+        log_error("Failed to initialize YAML parser");
+        fclose(file);
+        return -1;
+    }
+
+    yaml_parser_set_input_file(&parser, file);
+
+    if (!yaml_parser_load(&parser, &document)) {
+        log_error("Failed to parse YAML document");
+        yaml_parser_delete(&parser);
+        fclose(file);
+        return -1;
+    }
+
+    yaml_node_t *root = yaml_document_get_root_node(&document);
+    if (!root || root->type != YAML_MAPPING_NODE) {
+        log_error("Invalid YAML document structure");
+        yaml_document_delete(&document);
+        yaml_parser_delete(&parser);
+        fclose(file);
+        return -1;
+    }
+
+    proxy_t *current_px = NULL;
+
+    for (yaml_node_pair_t *pair = root->data.mapping.pairs.start;
+         pair < root->data.mapping.pairs.top; pair++) {
+        yaml_node_t *key = yaml_document_get_node(&document, pair->key);
+        yaml_node_t *value = yaml_document_get_node(&document, pair->value);
+
+        if (!key || !value) continue;
+
+        const char *section = (const char *)key->data.scalar.value;
+
+        if (strcmp(section, "global") == 0) {
+            parse_yaml_global(&document, value);
+        } else if (strcmp(section, "defaults") == 0) {
+            parse_yaml_defaults(&document, value, &current_px);
+        } else if (strcmp(section, "frontends") == 0 && value->type == YAML_MAPPING_NODE) {
+            for (yaml_node_pair_t *fe_pair = value->data.mapping.pairs.start;
+                 fe_pair < value->data.mapping.pairs.top; fe_pair++) {
+                yaml_node_t *fe_key = yaml_document_get_node(&document, fe_pair->key);
+                yaml_node_t *fe_val = yaml_document_get_node(&document, fe_pair->value);
+
+                if (!fe_key || !fe_val) continue;
+
+                const char *fe_name = (const char *)fe_key->data.scalar.value;
+                current_px = NULL;
+                parse_yaml_frontend(&document, fe_val, fe_name, &current_px);
+            }
+        } else if (strcmp(section, "backends") == 0 && value->type == YAML_MAPPING_NODE) {
+            for (yaml_node_pair_t *be_pair = value->data.mapping.pairs.start;
+                 be_pair < value->data.mapping.pairs.top; be_pair++) {
+                yaml_node_t *be_key = yaml_document_get_node(&document, be_pair->key);
+                yaml_node_t *be_val = yaml_document_get_node(&document, be_pair->value);
+
+                if (!be_key || !be_val) continue;
+
+                const char *be_name = (const char *)be_key->data.scalar.value;
+                current_px = NULL;
+                parse_yaml_backend(&document, be_val, be_name, &current_px);
+            }
+        }
+    }
+
+    yaml_document_delete(&document);
+    yaml_parser_delete(&parser);
+    fclose(file);
+
+    return 0;
+}
+
+int config_parse(const char *filename) {
+    if (!filename) {
+        log_error("No config file specified");
+        return -1;
+    }
+
+    struct stat st;
+    if (stat(filename, &st) != 0) {
+        log_error("Config file not found: %s", filename);
+        return -1;
+    }
+
+    int format = detect_config_format(filename);
+
+    if (format == 1) {
+        return parse_yaml_config(filename);
+    } else {
+        return config_parse_file(filename);
+    }
 }

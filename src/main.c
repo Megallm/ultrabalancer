@@ -14,29 +14,24 @@
 #include <time.h>
 #include "core/lb_types.h"
 #include "core/common.h"
+#include "config/config.h"
 
 static loadbalancer_t* global_lb = NULL;
 
-// Forward declarations for static functions
 static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm);
 static void main_lb_destroy(loadbalancer_t* lb);
 static int main_lb_start(loadbalancer_t* lb);
 static void main_lb_stop(loadbalancer_t* lb);
 static int main_lb_add_backend(loadbalancer_t* lb, const char* host, uint16_t port, uint32_t weight);
 
-// Global variables (extern declaration only - defined in proxy.c)
-extern struct proxy *proxies_list;
-time_t start_time;
-uint32_t total_connections = 0;
-volatile unsigned int now_ms = 0;
+extern void* health_check_thread(void* arg);
+extern void* stats_thread(void* arg);
 
-struct global global = {
-    .maxconn = 100000,
-    .nbproc = 1,
-    .nbthread = 8,
-    .daemon = 0,
-    .debug = 0
-};
+extern struct proxy *proxies_list;
+extern struct global global;
+extern time_t start_time;
+extern uint32_t total_connections;
+extern volatile unsigned int now_ms;
 
 static void signal_handler(int sig) {
     if (global_lb) {
@@ -50,6 +45,7 @@ static void signal_handler(int sig) {
 static void print_usage(const char* prog) {
     printf("Usage: %s [OPTIONS]\n", prog);
     printf("Options:\n");
+    printf("  -c, --config FILE        Configuration file (.cfg or .yaml)\n");
     printf("  -p, --port PORT          Listen port (default: 8080)\n");
     printf("  -a, --algorithm ALGO     Load balancing algorithm:\n");
     printf("                           round-robin (default)\n");
@@ -60,7 +56,8 @@ static void print_usage(const char* prog) {
     printf("  -b, --backend HOST:PORT  Add backend server (can specify multiple)\n");
     printf("  -w, --workers NUM        Number of worker threads (default: CPU*2)\n");
     printf("  -h, --help              Show this help message\n");
-    printf("\nExample:\n");
+    printf("\nExamples:\n");
+    printf("  %s -c config/ultrabalancer.yaml\n", prog);
     printf("  %s -p 8080 -a least-conn -b 127.0.0.1:8001 -b 127.0.0.1:8002\n", prog);
 }
 
@@ -190,25 +187,67 @@ static backend_t* main_lb_select_backend(loadbalancer_t* lb, struct sockaddr_in*
 static void* worker_thread(void* arg) {
     loadbalancer_t* lb = (loadbalancer_t*)arg;
     struct epoll_event events[MAX_EVENTS];
+    char buffer[16384];
 
     while (lb->running) {
         int nfds = epoll_wait(lb->epfd, events, MAX_EVENTS, 100);
 
         for (int i = 0; i < nfds; i++) {
             if (events[i].data.fd == lb->listen_fd) {
-                // Accept new connection
                 struct sockaddr_in client_addr;
                 socklen_t addr_len = sizeof(client_addr);
 
                 int client_fd = accept4(lb->listen_fd, (struct sockaddr*)&client_addr,
-                                       &addr_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+                                       &addr_len, SOCK_CLOEXEC);
 
                 if (client_fd < 0) continue;
 
-                atomic_fetch_add(&lb->global_stats.total_requests, 1);
+                backend_t* backend = main_lb_select_backend(lb, &client_addr);
 
-                // Simple implementation - just close for now
-                // In real implementation, would handle the connection
+                if (backend && atomic_load(&backend->state) == BACKEND_UP) {
+                    int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
+                    if (backend_fd >= 0) {
+                        struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+                        setsockopt(backend_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                        setsockopt(backend_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+                        struct sockaddr_in backend_addr = {
+                            .sin_family = AF_INET,
+                            .sin_port = htons(backend->port)
+                        };
+                        inet_pton(AF_INET, backend->host, &backend_addr.sin_addr);
+
+                        atomic_fetch_add(&backend->active_conns, 1);
+                        atomic_fetch_add(&backend->total_conns, 1);
+
+                        if (connect(backend_fd, (struct sockaddr*)&backend_addr, sizeof(backend_addr)) == 0) {
+                            atomic_fetch_add(&lb->global_stats.total_requests, 1);
+
+                            ssize_t n = recv(client_fd, buffer, sizeof(buffer) - 1, MSG_WAITALL);
+                            if (n > 0) {
+                                ssize_t sent = send(backend_fd, buffer, n, 0);
+                                if (sent > 0) {
+                                    ssize_t total = 0;
+                                    while (total < sizeof(buffer) - 1) {
+                                        n = recv(backend_fd, buffer + total, sizeof(buffer) - 1 - total, 0);
+                                        if (n <= 0) break;
+                                        total += n;
+                                        if (n < 1000) break;
+                                    }
+                                    if (total > 0) {
+                                        send(client_fd, buffer, total, 0);
+                                    }
+                                }
+                            }
+                        } else {
+                            atomic_fetch_add(&lb->global_stats.failed_requests, 1);
+                        }
+
+                        atomic_fetch_sub(&backend->active_conns, 1);
+                        close(backend_fd);
+                    }
+                }
+
                 close(client_fd);
             }
         }
@@ -261,6 +300,16 @@ static int main_lb_start(loadbalancer_t* lb) {
         }
     }
 
+    pthread_t health_thread;
+    if (pthread_create(&health_thread, NULL, health_check_thread, lb) == 0) {
+        pthread_detach(health_thread);
+    }
+
+    pthread_t stats_tid;
+    if (pthread_create(&stats_tid, NULL, stats_thread, lb) == 0) {
+        pthread_detach(stats_tid);
+    }
+
     printf("Load balancer started on port %u with %u workers\n", lb->port, lb->worker_threads);
     printf("Algorithm: ");
     switch (lb->algorithm) {
@@ -270,6 +319,8 @@ static int main_lb_start(loadbalancer_t* lb) {
         case LB_ALGO_STICKY: printf("Weighted\n"); break;
         default: printf("Unknown\n");
     }
+    printf("\nHealth checks enabled (interval: %ums)\n", lb->config.health_check_interval_ms);
+    printf("Statistics will be printed every 5 seconds\n\n");
 
     return 0;
 }
@@ -293,6 +344,7 @@ static void main_lb_stop(loadbalancer_t* lb) {
 }
 
 int main(int argc, char** argv) {
+    const char* config_file = NULL;
     uint16_t port = 8080;
     lb_algorithm_t algorithm = LB_ALGO_ROUNDROBIN;
     struct {
@@ -304,6 +356,7 @@ int main(int argc, char** argv) {
     uint32_t workers = 0;
 
     static struct option long_options[] = {
+        {"config", required_argument, 0, 'c'},
         {"port", required_argument, 0, 'p'},
         {"algorithm", required_argument, 0, 'a'},
         {"backend", required_argument, 0, 'b'},
@@ -313,8 +366,12 @@ int main(int argc, char** argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:a:b:w:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:p:a:b:w:h", long_options, NULL)) != -1) {
         switch (opt) {
+            case 'c':
+                config_file = optarg;
+                break;
+
             case 'p':
                 port = atoi(optarg);
                 break;
@@ -374,6 +431,22 @@ int main(int argc, char** argv) {
                 print_usage(argv[0]);
                 exit(1);
         }
+    }
+
+    if (config_file) {
+        printf("Loading configuration from: %s\n", config_file);
+        if (config_parse(config_file) < 0) {
+            fprintf(stderr, "Failed to parse config file: %s\n", config_file);
+            exit(1);
+        }
+
+        if (config_check() < 0) {
+            fprintf(stderr, "Configuration validation failed\n");
+            exit(1);
+        }
+
+        printf("Configuration loaded successfully\n");
+        exit(0);
     }
 
     if (backend_count == 0) {

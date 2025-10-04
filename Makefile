@@ -28,7 +28,7 @@ LIBS = -lpthread -lm -lrt -ldl -lstdc++
 LIBS += -lssl -lcrypto
 LIBS += -lpcre -lz
 LIBS += -lbrotlienc -lbrotlidec
-# LIBS += -ljemalloc  # Commented out - not available
+LIBS += -lyaml
 
 # Optional features
 ifdef USE_SYSTEMD

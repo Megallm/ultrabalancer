@@ -26,7 +26,10 @@ int connect_to_backend(backend_t* backend) {
 
     int val = 1;
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-    setsockopt(sockfd, IPPROTO_TCP, TCP_QUICKACK, &val, sizeof(val));
+
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
@@ -109,6 +112,13 @@ void conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
 }
 
 int handle_client_data(loadbalancer_t* lb, lb_connection_t* conn) {
+    char buffer[16384];
+    ssize_t bytes_read = recv(conn->client_fd, buffer, sizeof(buffer), 0);
+
+    if (bytes_read <= 0) {
+        return bytes_read;
+    }
+
     if (conn->backend_fd < 0) {
         backend_t* backend = lb_select_backend(lb, &conn->client_addr);
         if (!backend) {
@@ -124,73 +134,34 @@ int handle_client_data(loadbalancer_t* lb, lb_connection_t* conn) {
         conn->backend = backend;
         atomic_fetch_add(&backend->active_conns, 1);
         atomic_fetch_add(&backend->total_conns, 1);
-
-        struct epoll_event ev = {
-            .events = EPOLLIN | EPOLLOUT | EPOLLET,
-            .data.ptr = conn
-        };
-        epoll_ctl(lb->epfd, EPOLL_CTL_ADD, conn->backend_fd, &ev);
     }
 
-    int pipefd[2];
-    if (pipe2(pipefd, O_NONBLOCK | O_CLOEXEC) < 0) {
+    ssize_t sent = send(conn->backend_fd, buffer, bytes_read, 0);
+    if (sent < 0) {
         return -1;
     }
 
-    ssize_t bytes = splice(conn->client_fd, NULL, pipefd[1], NULL,
-                          MAX_SPLICE_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-
-    if (bytes <= 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return bytes;
+    atomic_fetch_add(&lb->global_stats.bytes_in, bytes_read);
+    if (conn->backend) {
+        atomic_fetch_add(&conn->backend->stats.bytes_in, bytes_read);
     }
 
-    atomic_fetch_add(&lb->global_stats.bytes_in, bytes);
-    atomic_fetch_add(&conn->backend->stats.bytes_in, bytes);
+    char response[16384];
+    ssize_t resp_bytes = recv(conn->backend_fd, response, sizeof(response), 0);
 
-    ssize_t sent = splice(pipefd[0], NULL, conn->backend_fd, NULL,
-                         bytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+    if (resp_bytes > 0) {
+        ssize_t sent_client = send(conn->client_fd, response, resp_bytes, 0);
+        if (sent_client < 0) {
+            return -1;
+        }
 
-    close(pipefd[0]);
-    close(pipefd[1]);
-
-    if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        return -1;
+        atomic_fetch_add(&lb->global_stats.bytes_out, resp_bytes);
+        if (conn->backend) {
+            atomic_fetch_add(&conn->backend->stats.bytes_out, resp_bytes);
+        }
     }
 
-    return sent;
-}
-
-int handle_backend_data(loadbalancer_t* lb, lb_connection_t* conn) {
-    int pipefd[2];
-    if (pipe2(pipefd, O_NONBLOCK | O_CLOEXEC) < 0) {
-        return -1;
-    }
-
-    ssize_t bytes = splice(conn->backend_fd, NULL, pipefd[1], NULL,
-                          MAX_SPLICE_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-
-    if (bytes <= 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return bytes;
-    }
-
-    ssize_t sent = splice(pipefd[0], NULL, conn->client_fd, NULL,
-                         bytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
-
-    close(pipefd[0]);
-    close(pipefd[1]);
-
-    atomic_fetch_add(&lb->global_stats.bytes_out, bytes);
-    atomic_fetch_add(&conn->backend->stats.bytes_out, sent);
-
-    if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        return -1;
-    }
-
-    return sent;
+    return bytes_read;
 }
 
 void* worker_thread(void* arg) {
@@ -225,7 +196,10 @@ void* worker_thread(void* arg) {
 
                 int val = 1;
                 setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-                setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &val, sizeof(val));
+
+                struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+                setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
                 lb_connection_t* conn = conn_create(lb);
                 if (!conn) {
@@ -257,16 +231,15 @@ void* worker_thread(void* arg) {
                     should_close = true;
                 } else {
                     if (events[i].events & EPOLLIN) {
-                        int fd = (events[i].data.ptr == conn) ? conn->client_fd : conn->backend_fd;
-
-                        if (fd == conn->client_fd) {
-                            if (handle_client_data(lb, conn) < 0) {
-                                should_close = true;
-                            }
-                        } else if (fd == conn->backend_fd) {
-                            if (handle_backend_data(lb, conn) < 0) {
-                                should_close = true;
-                            }
+                        if (handle_client_data(lb, conn) <= 0) {
+                            should_close = true;
+                        }
+                    }
+                    if ((events[i].events & EPOLLOUT) && conn->backend_fd >= 0) {
+                        int err = 0;
+                        socklen_t len = sizeof(err);
+                        if (getsockopt(conn->backend_fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+                            should_close = true;
                         }
                     }
                 }

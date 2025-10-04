@@ -11,6 +11,8 @@
 #include <sys/epoll.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <fcntl.h>
+#include <sys/select.h>
 
 void* health_check_thread(void* arg) {
     loadbalancer_t* lb = (loadbalancer_t*)arg;
@@ -20,7 +22,7 @@ void* health_check_thread(void* arg) {
             backend_t* backend = lb->backends[i];
             if (!backend) continue;
 
-            int sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+            int sockfd = socket(AF_INET, SOCK_STREAM, 0);
             if (sockfd < 0) continue;
 
             struct timeval tv = {
@@ -29,6 +31,9 @@ void* health_check_thread(void* arg) {
             };
             setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+            // Set connect timeout
+            fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
 
             struct sockaddr_in addr = {
                 .sin_family = AF_INET,
@@ -47,7 +52,32 @@ void* health_check_thread(void* arg) {
 
             uint64_t start_ns = get_time_ns();
 
-            if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            // Try non-blocking connect with proper timeout handling
+            int connect_result = connect(sockfd, (struct sockaddr*)&addr, sizeof(addr));
+
+            if (connect_result < 0 && errno == EINPROGRESS) {
+                // Wait for connection with select
+                fd_set write_fds;
+                FD_ZERO(&write_fds);
+                FD_SET(sockfd, &write_fds);
+
+                struct timeval connect_tv = { .tv_sec = 2, .tv_usec = 0 };
+                int select_result = select(sockfd + 1, NULL, &write_fds, NULL, &connect_tv);
+
+                if (select_result > 0) {
+                    int sock_error = 0;
+                    socklen_t len = sizeof(sock_error);
+                    getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &sock_error, &len);
+                    connect_result = (sock_error == 0) ? 0 : -1;
+                } else {
+                    connect_result = -1;
+                }
+            }
+
+            // Set socket back to blocking for send/recv
+            fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) & ~O_NONBLOCK);
+
+            if (connect_result == 0) {
                 const char* http_req = "HEAD / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
                 ssize_t sent = send(sockfd, http_req, strlen(http_req), MSG_NOSIGNAL);
 
@@ -67,26 +97,26 @@ void* health_check_thread(void* arg) {
                             atomic_store(&backend->response_time_ns, response_time);
                             atomic_store(&backend->last_check_ns, get_time_ns());
                         } else {
-                            atomic_fetch_add(&backend->failed_conns, 1);
-                            if (atomic_load(&backend->failed_conns) > 3) {
+                            uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
+                            if (fails >= 10) {
                                 atomic_store(&backend->state, BACKEND_DOWN);
                             }
                         }
                     } else {
-                        atomic_fetch_add(&backend->failed_conns, 1);
-                        if (atomic_load(&backend->failed_conns) > 3) {
+                        uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
+                        if (fails >= 10) {
                             atomic_store(&backend->state, BACKEND_DOWN);
                         }
                     }
                 } else {
-                    atomic_fetch_add(&backend->failed_conns, 1);
-                    if (atomic_load(&backend->failed_conns) > 3) {
+                    uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
+                    if (fails >= 10) {
                         atomic_store(&backend->state, BACKEND_DOWN);
                     }
                 }
             } else {
-                atomic_fetch_add(&backend->failed_conns, 1);
-                if (atomic_load(&backend->failed_conns) > 3) {
+                uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
+                if (fails >= 10) {
                     atomic_store(&backend->state, BACKEND_DOWN);
                 }
             }
@@ -94,7 +124,7 @@ void* health_check_thread(void* arg) {
             close(sockfd);
         }
 
-        usleep(lb->config.health_check_interval_ms * 1000);
+        usleep(lb->config.health_check_interval_ms * 1000 * 2);
     }
 
     return NULL;

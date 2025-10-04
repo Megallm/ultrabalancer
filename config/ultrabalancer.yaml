@@ -1,0 +1,116 @@
+global:
+  daemon: true
+  maxconn: 100000
+  nbproc: 1
+  nbthread: 8
+  log: "127.0.0.1:514"
+  stats_socket: "/var/run/ultrabalancer.sock"
+  pidfile: "/var/run/ultrabalancer.pid"
+
+defaults:
+  mode: http
+  timeout:
+    connect: 5
+    client: 30
+    server: 30
+    check: 2
+  retries: 3
+  maxconn: 50000
+
+frontends:
+  web_frontend:
+    bind:
+      - "*:80"
+      - "*:443"
+    default_backend: web_servers
+
+  api_frontend:
+    bind:
+      - "*:8080"
+    default_backend: api_servers
+
+  websocket_frontend:
+    bind:
+      - "*:9090"
+    default_backend: websocket_servers
+
+backends:
+  web_servers:
+    balance: roundrobin
+    servers:
+      - name: web1
+        address: "127.0.0.1:3001"
+        weight: 100
+        check: true
+      - name: web2
+        address: "127.0.0.1:3002"
+        weight: 100
+        check: true
+      - name: web3
+        address: "127.0.0.1:3003"
+        weight: 50
+        check: true
+
+  api_servers:
+    balance: leastconn
+    servers:
+      - name: api1
+        address: "127.0.0.1:4001"
+        weight: 100
+        check: true
+      - name: api2
+        address: "127.0.0.1:4002"
+        weight: 100
+        check: true
+      - name: api3
+        address: "127.0.0.1:4003"
+        weight: 100
+        check: true
+
+  static_servers:
+    balance: roundrobin
+    servers:
+      - name: static1
+        address: "127.0.0.1:5001"
+        weight: 100
+        check: true
+      - name: static2
+        address: "127.0.0.1:5002"
+        weight: 100
+        check: true
+
+  websocket_servers:
+    balance: source
+    servers:
+      - name: ws1
+        address: "127.0.0.1:6001"
+        weight: 100
+        check: true
+      - name: ws2
+        address: "127.0.0.1:6002"
+        weight: 100
+        check: true
+
+  admin_servers:
+    balance: roundrobin
+    servers:
+      - name: admin1
+        address: "127.0.0.1:7001"
+        weight: 100
+        check: true
+
+  cache_servers:
+    balance: uri
+    servers:
+      - name: cache1
+        address: "127.0.0.1:8001"
+        weight: 100
+        check: true
+      - name: cache2
+        address: "127.0.0.1:8002"
+        weight: 100
+        check: true
+      - name: cache3
+        address: "127.0.0.1:8003"
+        weight: 100
+        check: true
