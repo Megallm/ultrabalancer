@@ -69,6 +69,8 @@ public:
     void set_priority(int priority) { priority_ = priority; }
     int get_priority() const { return priority_; }
 
+    const std::string& get_name() const { return name_; }
+
     void enable_circuit_breaker(int error_threshold, std::chrono::seconds reset_timeout);
     bool is_circuit_open() const;
 
@@ -77,6 +79,10 @@ private:
     std::vector<std::shared_ptr<RouteRule>> rules_;
     std::vector<std::shared_ptr<RouteTarget>> targets_;
     int priority_{0};
+
+    // Weight caching for performance
+    mutable std::atomic<int> cached_total_weight_;
+    mutable std::atomic<bool> weight_cache_valid_;
 
     mutable std::atomic<int> errors_{0};
     int error_threshold_{50};
@@ -122,6 +128,9 @@ private:
     std::string default_backend_;
     mutable std::shared_mutex routes_mutex_;
 
+    // Cache default backend target to avoid repeated allocations
+    std::atomic<RouteTarget*> default_backend_target_;
+
     struct RateLimiter {
         int tokens;
         int max_tokens;
@@ -132,7 +141,14 @@ private:
     std::unordered_map<std::string, std::unique_ptr<RateLimiter>> rate_limiters_;
     mutable std::mutex rate_limiters_mutex_;
 
-    mutable RoutingStats stats_;
+    // Internal stats use atomics for lock-free updates
+    struct InternalStats {
+        std::atomic<uint64_t> total_requests{0};
+        std::atomic<uint64_t> routed_requests{0};
+        std::atomic<uint64_t> default_route_hits{0};
+        std::unordered_map<std::string, uint64_t> backend_selections;
+    };
+    mutable InternalStats stats_;
     mutable std::mutex stats_mutex_;
 
     void refill_tokens(RateLimiter* limiter, int tokens_per_second);

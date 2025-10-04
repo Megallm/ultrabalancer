@@ -58,6 +58,10 @@ MetricsAggregator::Stats MetricsAggregator::get_stats() {
 
     if (auto m = get_metric("requests.success")) {
         stats.successful_requests = m->get_count();
+        // stats.failed_requests =
+        //     stats.total_requests > stats.successful_requests
+        //         ? stats.total_requests - stats.successful_requests
+        //         : 0;
     }
 
     if (auto m = get_metric("requests.failed")) {

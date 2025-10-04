@@ -29,7 +29,7 @@ public:
 private:
     int fd_;
     sockaddr_storage addr_;
-    std::atomic<bool> alive_;
+    mutable std::atomic<bool> alive_;
     std::chrono::steady_clock::time_point last_used_;
 };
 
@@ -86,12 +86,15 @@ public:
 
     void cleanup_all();
 
-private:
-    ConnectionManager() = default;
-    ~ConnectionManager() = default;
-
+    // Delete copy and move to enforce singleton
     ConnectionManager(const ConnectionManager&) = delete;
     ConnectionManager& operator=(const ConnectionManager&) = delete;
+    ConnectionManager(ConnectionManager&&) = delete;
+    ConnectionManager& operator=(ConnectionManager&&) = delete;
+
+private:
+    ConnectionManager() {}
+    ~ConnectionManager() = default;
 
     std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<ConnectionPool>> pools_;

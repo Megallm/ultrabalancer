@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
+#include <shared_mutex>
 
 namespace ultrabalancer {
 
@@ -21,12 +22,14 @@ Connection::~Connection() {
 }
 
 bool Connection::is_alive() const {
-    if (!alive_) return false;
+    // check atomic flag first before syscall
+    if (!alive_.load(std::memory_order_acquire)) return false;
 
     char buf;
     int ret = recv(fd_, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
     if (ret == 0 || (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-        // Don't modify alive_ in const function - let caller handle this
+        // connection is dead update atomic flag for future checks
+        alive_.store(false, std::memory_order_release);
         return false;
     }
     return true;
@@ -34,36 +37,65 @@ bool Connection::is_alive() const {
 
 void Connection::reset() {
     last_used_ = std::chrono::steady_clock::now();
+    // Ensure connection is marked alive when reset (reused from pool)
+    alive_.store(true, std::memory_order_release);
 }
 
 ConnectionPool::ConnectionPool(size_t max_size, size_t max_idle)
     : max_size_(max_size), max_idle_(max_idle), active_(0) {}
 
 ConnectionPool::~ConnectionPool() {
-    cleanup_idle(std::chrono::seconds(0)); // Clean up all idle connections
+    cleanup_idle(std::chrono::seconds(0)); // idle connection cleanup 
 }
 
 std::shared_ptr<Connection> ConnectionPool::acquire(const server_t* server) {
-    std::unique_lock<std::mutex> lock(mutex_);
-
     ServerKey key{server->hostname ? server->hostname : "", server->port};
 
-    auto& queue = idle_queue_[key];
-    while (!queue.empty()) {
-        auto conn = queue.front();
-        queue.pop();
+    // Try to acquire from idle queue with minimal lock time
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
 
-        if (conn->is_alive()) {
-            active_++;
-            return conn;
+        auto it = idle_queue_.find(key);
+        if (it != idle_queue_.end()) {
+            auto& queue = it->second;
+
+            // Search for a live connection in the queue
+            while (!queue.empty()) {
+                auto conn = queue.front();
+                queue.pop();
+
+                // Check liveness without holding the lock for syscall
+                lock.unlock();
+                bool alive = conn->is_alive();
+                lock.lock();
+
+                if (alive) {
+                    active_.fetch_add(1, std::memory_order_relaxed);
+                    conn->reset();
+                    return conn;
+                }
+                // Dead connection - let it be destroyed
+            }
         }
+
+        // No idle connection available - check if we can create new one
+        size_t current_active = active_.load(std::memory_order_relaxed);
+        if (current_active >= max_size_) {
+            // Wait for a connection to be released
+            cv_.wait(lock, [this] {
+                return active_.load(std::memory_order_relaxed) < max_size_;
+            });
+        }
+
+        active_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    cv_.wait(lock, [this] { return active_ < max_size_; });
-
+    // Create connection outside of lock to avoid blocking other threads
     auto conn = create_connection(server);
-    if (conn) {
-        active_++;
+    if (!conn) {
+        // Failed to create - decrement active counter
+        active_.fetch_sub(1, std::memory_order_relaxed);
+        cv_.notify_one();
     }
     return conn;
 }
@@ -71,9 +103,10 @@ std::shared_ptr<Connection> ConnectionPool::acquire(const server_t* server) {
 void ConnectionPool::release(std::shared_ptr<Connection> conn) {
     if (!conn) return;
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    active_--;
+    // Decrement active counter immediately using atomic operation
+    active_.fetch_sub(1, std::memory_order_relaxed);
 
+    // Check if connection is still alive before returning to pool
     if (!conn->is_alive()) {
         cv_.notify_one();
         return;
@@ -81,6 +114,12 @@ void ConnectionPool::release(std::shared_ptr<Connection> conn) {
 
     conn->reset();
 
+    // Determine the server key for this connection
+    // We need to find which queue this connection belongs to
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Simple heuristic: add to first queue that has space
+    // In production, we'd want to track the original server key
     for (auto& [key, queue] : idle_queue_) {
         if (queue.size() < max_idle_) {
             queue.push(conn);
@@ -89,6 +128,7 @@ void ConnectionPool::release(std::shared_ptr<Connection> conn) {
         }
     }
 
+    // If all queues are full, connection is dropped (destructor handles cleanup)
     cv_.notify_one();
 }
 

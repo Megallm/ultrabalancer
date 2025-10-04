@@ -20,7 +20,7 @@ brew install openssl pcre zlib brotli jemalloc
 
 ### Build from Source
 ```bash
-git clone https://github.com/ultrabalancer/ultrabalancer.git
+git clone https://github.com/Bas3line/ultrabalancer.git
 cd ultrabalancer
 make clean
 make all

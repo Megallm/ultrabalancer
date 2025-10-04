@@ -452,5 +452,5 @@ Please see CONTRIBUTING.md for guidelines
 ## Support
 
 - Documentation: https://ultrabalancer.io/docs
-- Issues: https://github.com/ultrabalancer/ultrabalancer/issues
+- Issues: https://github.com/Bas3line/ultrabalancer/issues
 - Community: https://discord.gg/ultrabalancer
