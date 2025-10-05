@@ -14,7 +14,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
+#ifdef USE_PCRE
 #include <pcre.h>
+#endif
 
 #define UB_VERSION "1.0.0"
 #define CACHE_LINE_SIZE 64

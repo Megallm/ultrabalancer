@@ -4,7 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "core/common.h"
+#ifdef USE_PCRE
 #include <pcre.h>
+#endif
 #include <netinet/in.h>
 
 struct session;
@@ -64,8 +66,13 @@ typedef struct acl_pattern {
             int len;
         } str;
         struct {
+#ifdef USE_PCRE
             pcre *regex;
             pcre_extra *extra;
+#else
+            void *regex;
+            void *extra;
+#endif
         } reg;
         struct {
             void *ptr;

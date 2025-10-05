@@ -7,8 +7,12 @@
 #include <openssl/ssl.h>
 #include "core/common.h"
 
+#ifndef USE_PCRE
 struct real_pcre8_or_16;
 typedef struct real_pcre8_or_16 pcre;
+#else
+#include <pcre.h>
+#endif
 
 #define CHK_ST_INIT          0x00
 #define CHK_ST_CONFIGURED    0x01

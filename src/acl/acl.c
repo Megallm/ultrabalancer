@@ -155,12 +155,17 @@ int acl_match_reg(struct sample *smp, acl_pattern_t *pattern) {
     if (smp->data.type != SMP_T_STR || !pattern->val.reg.regex)
         return 0;
 
+#ifdef USE_PCRE
     int ovector[30];
     int ret = pcre_exec(pattern->val.reg.regex, pattern->val.reg.extra,
                        smp->data.u.str.ptr, smp->data.u.str.len,
                        0, 0, ovector, 30);
 
     return ret >= 0;
+#else
+    log_warning("PCRE regex matching not available");
+    return 0;
+#endif
 }
 
 int acl_match_ip(struct sample *smp, acl_pattern_t *pattern) {
@@ -239,6 +244,7 @@ int pattern_parse_ip(const char **text, acl_pattern_t *pattern, int *opaque) {
 }
 
 int pattern_parse_reg(const char **text, acl_pattern_t *pattern, int *opaque) {
+#ifdef USE_PCRE
     const char *error;
     int erroffset;
 
@@ -264,6 +270,10 @@ int pattern_parse_reg(const char **text, acl_pattern_t *pattern, int *opaque) {
 
     *text = end;
     return 1;
+#else
+    log_error("PCRE regex parsing not available (library not compiled)");
+    return 0;
+#endif
 }
 
 acl_t* acl_find(struct list *head, const char *name) {

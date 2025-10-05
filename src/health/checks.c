@@ -113,6 +113,7 @@ int check_tcp(check_t *check) {
         }
 
         if (check->tcp.expect_regex) {
+#ifdef USE_PCRE
             int ovector[30];
             int ret = pcre_exec(check->tcp.expect_regex, NULL, buffer, received,
                                0, 0, ovector, 30);
@@ -122,6 +123,10 @@ int check_tcp(check_t *check) {
                 set_server_check_status(check, HCHK_STATUS_L7RSP, "Regex mismatch");
                 return -1;
             }
+#else
+            // PCRE not available, skip regex check
+            log_warning("PCRE regex check skipped (library not available)");
+#endif
         }
     }
 
