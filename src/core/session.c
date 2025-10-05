@@ -1,6 +1,7 @@
 #include "core/proxy.h"
 #include "core/common.h"
 #include <stdlib.h>
+#include <sys/time.h>
 
 session_t* session_new(listener_t *l) {
     session_t *sess = calloc(1, sizeof(session_t));

@@ -57,19 +57,6 @@ void memory_pool_free(memory_pool_t* pool, void* ptr, size_t size) {
     pthread_spin_unlock(&pool->lock);
 }
 
-typedef struct hash_node {
-    uint64_t hash;
-    backend_t* backend;
-    struct hash_node* next;
-} hash_node_t;
-
-typedef struct consistent_hash {
-    hash_node_t** table;
-    uint32_t size;
-    uint32_t virtual_nodes;
-    pthread_spinlock_t lock;
-} consistent_hash_t;
-
 uint64_t murmur3_64(const void* key, size_t len, uint64_t seed) {
     const uint64_t m = 0xc6a4a7935bd1e995ULL;
     const int r = 47;
@@ -94,11 +81,17 @@ uint64_t murmur3_64(const void* key, size_t len, uint64_t seed) {
 
     switch (len & 7) {
         case 7: h ^= ((uint64_t)data2[6]) << 48;
+                __attribute__((fallthrough));
         case 6: h ^= ((uint64_t)data2[5]) << 40;
+                __attribute__((fallthrough));
         case 5: h ^= ((uint64_t)data2[4]) << 32;
+                __attribute__((fallthrough));
         case 4: h ^= ((uint64_t)data2[3]) << 24;
+                __attribute__((fallthrough));
         case 3: h ^= ((uint64_t)data2[2]) << 16;
+                __attribute__((fallthrough));
         case 2: h ^= ((uint64_t)data2[1]) << 8;
+                __attribute__((fallthrough));
         case 1: h ^= ((uint64_t)data2[0]);
                 h *= m;
     };
