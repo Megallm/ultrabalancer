@@ -450,9 +450,18 @@ int main(int argc, char** argv) {
     }
 
     if (backend_count == 0) {
-        backends[0] = (typeof(backends[0])){"127.0.0.1", 8001, 1};
-        backends[1] = (typeof(backends[0])){"127.0.0.1", 8002, 1};
-        backends[2] = (typeof(backends[0])){"127.0.0.1", 8003, 1};
+        strncpy(backends[0].host, "127.0.0.1", sizeof(backends[0].host) - 1);
+        backends[0].port = 8001;
+        backends[0].weight = 1;
+
+        strncpy(backends[1].host, "127.0.0.1", sizeof(backends[1].host) - 1);
+        backends[1].port = 8002;
+        backends[1].weight = 1;
+
+        strncpy(backends[2].host, "127.0.0.1", sizeof(backends[2].host) - 1);
+        backends[2].port = 8003;
+        backends[2].weight = 1;
+
         backend_count = 3;
         printf("No backends specified, using defaults: 127.0.0.1:8001-8003\n");
     }
