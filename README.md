@@ -5,8 +5,6 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Performance](https://img.shields.io/badge/performance-1M%2B_RPS-orange.svg)]()
 
-**IMPORTANT: This is a skeleton/framework project under continuous development. Core features are functional but extensive testing and production hardening is ongoing.**
-
 ## What is UltraBalancer?
 
 UltraBalancer is a next-generation, high-performance load balancing framework designed for modern cloud-native applications. Built with a hybrid C/C++ architecture, it combines the raw performance of C with the flexibility and advanced features of modern C++17.
@@ -71,6 +69,13 @@ UltraBalancer addresses these needs with:
 ```
 
 ## Core Features
+
+### Automatic Health Checks & Failover
+- **Intelligent Health Monitoring** - Periodic HTTP health checks to detect backend failures
+- **Automatic Failover** - Failed backends are automatically removed from rotation
+- **Configurable Thresholds** - Set custom fail counts and check intervals
+- **Graceful Recovery** - Backends automatically rejoin when healthy
+- **Real-time Notifications** - Console logging of state changes (UP/DOWN)
 
 ### Load Balancing Algorithms
 - **Round Robin** - Equal distribution
@@ -157,12 +162,68 @@ ultrabalancer
 # Start with custom config
 ultrabalancer -f /path/to/config.yaml
 
-# Start in daemon mode
-ultrabalancer -D
+# Start with CLI options (recommended)
+ultrabalancer -p 8080 -a round-robin \
+  -b 192.168.1.10:8080 \
+  -b 192.168.1.11:8080 \
+  -b 192.168.1.12:8080
+
+# Disable health checks
+ultrabalancer -p 8080 --no-health-check -b 127.0.0.1:8001
+
+# Custom health check settings
+ultrabalancer -p 8080 \
+  --health-check-interval 3000 \
+  --health-check-fails 5 \
+  -b 192.168.1.10:8080
 
 # Check configuration
 ultrabalancer -c -f /path/to/config.yaml
 ```
+
+### Health Check Configuration
+
+UltraBalancer performs automatic health checks on all backend servers:
+
+**CLI Options:**
+- `--health-check-enabled` - Enable health checks (default: true)
+- `--no-health-check` - Disable health checks
+- `--health-check-interval <ms>` - Check interval in milliseconds (default: 5000)
+- `--health-check-fails <count>` - Failed checks before marking DOWN (default: 3)
+
+**How it works:**
+1. Every 5 seconds (configurable), sends HTTP HEAD request to each backend
+2. Accepts HTTP 200, 204, 301, 302 as healthy responses
+3. After N consecutive failures, marks backend as DOWN
+4. DOWN backends are excluded from load balancing
+5. Once backend recovers, automatically marks it as UP
+
+**Example scenario:**
+```bash
+# Start with 3 backends
+./bin/ultrabalancer -p 8080 -b 127.0.0.1:8001 -b 127.0.0.1:8002 -b 127.0.0.1:8003
+
+# Output when server goes down:
+# [HEALTH] Backend 127.0.0.1:8002 marked DOWN after 3 failed checks
+
+# Output when server recovers:
+# [HEALTH] Backend 127.0.0.1:8002 is now UP (response time: 1.23ms)
+```
+
+### Testing Health Checks
+
+Run the included test script:
+```bash
+./test_healthcheck.sh
+```
+
+This script will:
+- Start 3 backend servers
+- Start UltraBalancer
+- Simulate server failure
+- Demonstrate automatic failover
+- Show recovery when server restarts
+
 
 ## Monitoring
 

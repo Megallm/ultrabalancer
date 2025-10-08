@@ -33,9 +33,11 @@ loadbalancer_t* lb_create(uint16_t port, lb_algorithm_t algorithm) {
     lb->config.keepalive_timeout_ms = 60000;
     lb->config.health_check_interval_ms = 5000;
     lb->config.max_connections = MAX_CONNECTIONS;
+    lb->config.health_check_fail_threshold = 3;
     lb->config.tcp_nodelay = true;
     lb->config.so_reuseport = true;
     lb->config.defer_accept = true;
+    lb->config.health_check_enabled = true;
 
     lb->epfd = epoll_create1(EPOLL_CLOEXEC);
     if (lb->epfd < 0) {
