@@ -686,7 +686,7 @@ echo "Debug info collected: $OUTPUT_DIR.tar.gz"
 
 ### Community Resources
 
-- GitHub Issues: https://github.com/Bas3line/ultrabalancer/issues
+- GitHub Issues: https://github.com/Megallm/ultrabalancer/issues
 - Discord: https://discord.gg/ultrabalancer
 - Stack Overflow: Tag `ultrabalancer`
 - Documentation: https://docs.ultrabalancer.io

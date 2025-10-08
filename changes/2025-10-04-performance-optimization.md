@@ -2,7 +2,7 @@
 
 **Date:** October 4, 2025
 
-**Developer:** [Kira](https://github.com/Bas3line)
+**Developer:** [Kira](https://github.com/Megallm)
 
 **Components:** Core Request Router & Connection Pool Modules
 
@@ -870,7 +870,7 @@ This is safe because:
 
 **Project:** UltraBalancer - High-Performance Load Balancer
 **Website:** https://ultrabalancer.io
-**Repository:** https://github.com/Bas3line/ultrabalancer
+**Repository:** https://github.com/Megallm/ultrabalancer
 **License:** MIT
 
 ---
@@ -879,7 +879,7 @@ This is safe because:
 
 ### Development Team
 
-**Engineer & Maintainer:** Kira ([@Bas3line](https://github.com/Bas3line))
+**Engineer & Maintainer:** Kira ([@Bas3line](https://github.com/Megallm))
 - Architecture and implementation
 - Performance analysis and optimization
 - Testing and validation
@@ -900,4 +900,4 @@ This performance optimization report was collaboratively written by Claude Code 
 
 All changes have been validated through compilation and are ready for comprehensive performance testing.
 
-For questions or contributions, please visit https://ultrabalancer.io or the project repository at https://github.com/Bas3line/ultra-balancer.
+For questions or contributions, please visit https://ultrabalancer.io or the project repository at https://github.com/Megallm/ultra-balancer.

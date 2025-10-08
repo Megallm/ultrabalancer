@@ -72,7 +72,7 @@ sudo dnf install -y \
 
 ```bash
 # Clone repository
-git clone https://github.com/Bas3line/ultrabalancer.git
+git clone https://github.com/Megallm/ultrabalancer.git
 cd ultrabalancer
 
 # Create development branch
@@ -614,7 +614,7 @@ Special thanks to all contributors!
 ### Getting Help
 
 - Read the [documentation](https://docs.ultrabalancer.io)
-- Search [existing issues](https://github.com/Bas3line/ultrabalancer/issues)
+- Search [existing issues](https://github.com/Megallm/ultrabalancer/issues)
 - Ask in [Discord](https://discord.gg/ultrabalancer)
 - Stack Overflow tag: `ultrabalancer`
 

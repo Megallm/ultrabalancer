@@ -47,7 +47,7 @@ sudo apt-get install -y build-essential cmake libssl-dev libpcre3-dev \
                         zlib1g-dev libbrotli-dev libjemalloc-dev
 
 # Clone and build
-git clone https://github.com/Bas3line/ultrabalancer.git
+git clone https://github.com/Megallm/ultrabalancer.git
 cd ultrabalancer
 mkdir build && cd build
 cmake ..
@@ -452,5 +452,5 @@ Please see CONTRIBUTING.md for guidelines
 ## Support
 
 - Documentation: https://ultrabalancer.io/docs
-- Issues: https://github.com/Bas3line/ultrabalancer/issues
+- Issues: https://github.com/Megallm/ultrabalancer/issues
 - Community: https://discord.gg/ultrabalancer

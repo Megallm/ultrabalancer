@@ -2,7 +2,7 @@
 
 **Date:** October 5, 2025
 
-**Developer:** [Kira](https://github.com/Bas3line)
+**Developer:** [Kira](https://github.com/Megallm)
 
 **Components:** Configuration Parser Module
 
@@ -692,7 +692,7 @@ The YAML parser includes comprehensive error handling:
 
 **Project:** UltraBalancer - High-Performance Load Balancer
 **Website:** https://ultrabalancer.io
-**Repository:** https://github.com/Bas3line/ultra-balancer
+**Repository:** https://github.com/Megallm/ultra-balancer
 **License:** MIT
 
 ---
@@ -701,7 +701,7 @@ The YAML parser includes comprehensive error handling:
 
 ### Development Team
 
-**Engineer & Maintainer:** Kira ([@Bas3line](https://github.com/Bas3line))
+**Engineer & Maintainer:** Kira ([@Bas3line](https://github.com/Megallm))
 - Configuration parser design and implementation
 - YAML format schema design
 - Testing and validation
@@ -718,4 +718,4 @@ This configuration parser enhancement was developed to provide users with flexib
 
 All changes have been tested and validated through automated tests and manual verification.
 
-For questions or contributions, please visit https://ultrabalancer.io or the project repository at https://github.com/Bas3line/ultra-balancer.
+For questions or contributions, please visit https://ultrabalancer.io or the project repository at https://github.com/Megallm/ultra-balancer.

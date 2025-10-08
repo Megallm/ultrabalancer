@@ -114,7 +114,7 @@ sudo yum install brotli-devel jemalloc-devel
 
 ### Building from Source
 ```bash
-git clone https://github.com/Bas3line/ultrabalancer.git
+git clone https://github.com/Megallm/ultrabalancer.git
 cd ultrabalancer
 make
 sudo make install
@@ -256,6 +256,11 @@ auto target = router->route_request("GET", "/api/v1/users", headers);
 
 We welcome contributions! Please see [CONTRIBUTING.md](docs/contributing.md) for details.
 
+### Core Maintainer
+
+**Kira** - [GitHub](https://github.com/Bas3line)
+📧 Contact: [shubham@ghostlytics.org](mailto:shubham@ghostlytics.org)
+
 ## 📄 License
 
 UltraBalancer is released under the MIT License. See [LICENSE](LICENSE) file for details.
@@ -273,9 +278,8 @@ This is an active development project. While core functionality is stable, exten
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/Bas3line/ultrabalancer/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/Bas3line/ultrabalancer/discussions)
+- **Issues**: [GitHub Issues](https://github.com/Megallm/ultrabalancer/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Megallm/ultrabalancer/discussions)
 
 ---
 
-**Built with ❤️ for performance** | **Powered by C & C++17** | **Optimized for the Cloud**
