@@ -368,13 +368,17 @@ const char* router_route_request(void* router, const char* method,
     auto cpp_router = static_cast<ultrabalancer::RequestRouter*>(router);
 
     std::unordered_map<std::string, std::string> headers;
-    headers["method"] = method;
+    // For simplicity, we skip parsing headers_json in this example
 
+    // headers["path"] = path;
+    headers["method"] = method;
     auto target = cpp_router->route_request(method, path, headers);
     if (target) {
         static thread_local std::string backend;
         backend = target->get_backend();
+        
         return backend.c_str();
+
     }
 
     return nullptr;
