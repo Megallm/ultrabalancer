@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)]()
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Performance](https://img.shields.io/badge/performance-1M%2B_RPS-orange.svg)]()
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Megallm/ultrabalancer?utm_source=oss&utm_medium=github&utm_campaign=Megallm%2Fultrabalancer&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 ## What is UltraBalancer?
 
