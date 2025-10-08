@@ -54,10 +54,15 @@ static void print_usage(const char* prog) {
     printf("                           response-time\n");
     printf("  -b, --backend HOST:PORT  Add backend server (can specify multiple)\n");
     printf("  -w, --workers NUM        Number of worker threads (default: CPU*2)\n");
+    printf("  --health-check-enabled   Enable health checks (default: true)\n");
+    printf("  --no-health-check        Disable health checks\n");
+    printf("  --health-check-interval  Health check interval in ms (default: 5000)\n");
+    printf("  --health-check-fails     Failed checks before marking down (default: 3)\n");
     printf("  -h, --help              Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s -c config/ultrabalancer.yaml\n", prog);
     printf("  %s -p 8080 -a least-conn -b 127.0.0.1:8001 -b 127.0.0.1:8002\n", prog);
+    printf("  %s -p 8080 --no-health-check -b 127.0.0.1:8001\n", prog);
 }
 
 static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
@@ -77,9 +82,11 @@ static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
     lb->config.keepalive_timeout_ms = 60000;
     lb->config.health_check_interval_ms = 5000;
     lb->config.max_connections = MAX_CONNECTIONS;
+    lb->config.health_check_fail_threshold = 3;
     lb->config.tcp_nodelay = true;
     lb->config.so_reuseport = true;
     lb->config.defer_accept = true;
+    lb->config.health_check_enabled = true;
 
     lb->epfd = epoll_create1(EPOLL_CLOEXEC);
     if (lb->epfd < 0) {
@@ -353,6 +360,9 @@ int main(int argc, char** argv) {
     } backends[MAX_BACKENDS];
     int backend_count = 0;
     uint32_t workers = 0;
+    bool health_check_enabled = true;
+    uint32_t health_check_interval = 5000;
+    uint32_t health_check_fails = 3;
 
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
@@ -360,6 +370,10 @@ int main(int argc, char** argv) {
         {"algorithm", required_argument, 0, 'a'},
         {"backend", required_argument, 0, 'b'},
         {"workers", required_argument, 0, 'w'},
+        {"health-check-enabled", no_argument, 0, 1001},
+        {"no-health-check", no_argument, 0, 1002},
+        {"health-check-interval", required_argument, 0, 1003},
+        {"health-check-fails", required_argument, 0, 1004},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -422,6 +436,22 @@ int main(int argc, char** argv) {
                 workers = atoi(optarg);
                 break;
 
+            case 1001:
+                health_check_enabled = true;
+                break;
+
+            case 1002:
+                health_check_enabled = false;
+                break;
+
+            case 1003:
+                health_check_interval = atoi(optarg);
+                break;
+
+            case 1004:
+                health_check_fails = atoi(optarg);
+                break;
+
             case 'h':
                 print_usage(argv[0]);
                 exit(0);
@@ -480,6 +510,15 @@ int main(int argc, char** argv) {
     if (workers > 0) {
         global_lb->worker_threads = workers;
     }
+
+    // Apply health check configuration from CLI
+    global_lb->config.health_check_enabled = health_check_enabled;
+    global_lb->config.health_check_interval_ms = health_check_interval;
+    global_lb->config.health_check_fail_threshold = health_check_fails;
+
+    printf("Health check: %s (interval: %ums, fail threshold: %u)\n",
+           health_check_enabled ? "enabled" : "disabled",
+           health_check_interval, health_check_fails);
 
     for (int i = 0; i < backend_count; i++) {
         if (main_lb_add_backend(global_lb, backends[i].host, backends[i].port,

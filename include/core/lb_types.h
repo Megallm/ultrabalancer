@@ -135,9 +135,11 @@ typedef struct {
     uint32_t keepalive_timeout_ms;
     uint32_t health_check_interval_ms;
     uint32_t max_connections;
+    uint32_t health_check_fail_threshold;
     bool tcp_nodelay;
     bool so_reuseport;
     bool defer_accept;
+    bool health_check_enabled;
 } config_t;
 
 typedef struct loadbalancer {

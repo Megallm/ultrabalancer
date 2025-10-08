@@ -18,6 +18,12 @@ void* health_check_thread(void* arg) {
     loadbalancer_t* lb = (loadbalancer_t*)arg;
 
     while (lb->running) {
+        // Skip health checks if disabled
+        if (!lb->config.health_check_enabled) {
+            sleep(1);
+            continue;
+        }
+
         for (uint32_t i = 0; i < lb->backend_count; i++) {
             backend_t* backend = lb->backends[i];
             if (!backend) continue;
@@ -91,33 +97,47 @@ void* health_check_thread(void* arg) {
                             (strstr(response, " 200 ") || strstr(response, " 204 ") ||
                              strstr(response, " 301 ") || strstr(response, " 302 "))) {
 
+                            backend_state_t prev_state = atomic_load(&backend->state);
                             atomic_store(&backend->state, BACKEND_UP);
                             atomic_store(&backend->failed_conns, 0);
                             uint64_t response_time = get_time_ns() - start_ns;
                             atomic_store(&backend->response_time_ns, response_time);
                             atomic_store(&backend->last_check_ns, get_time_ns());
+
+                            if (prev_state != BACKEND_UP) {
+                                printf("[HEALTH] Backend %s:%u is now UP (response time: %.2fms)\n",
+                                       backend->host, backend->port, response_time / 1000000.0);
+                            }
                         } else {
                             uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
-                            if (fails >= 10) {
+                            if (fails >= lb->config.health_check_fail_threshold) {
                                 atomic_store(&backend->state, BACKEND_DOWN);
+                                printf("[HEALTH] Backend %s:%u marked DOWN after %u failed checks\n",
+                                       backend->host, backend->port, fails);
                             }
                         }
                     } else {
                         uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
-                        if (fails >= 10) {
+                        if (fails >= lb->config.health_check_fail_threshold) {
                             atomic_store(&backend->state, BACKEND_DOWN);
+                            printf("[HEALTH] Backend %s:%u marked DOWN after %u failed checks\n",
+                                   backend->host, backend->port, fails);
                         }
                     }
                 } else {
                     uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
-                    if (fails >= 10) {
+                    if (fails >= lb->config.health_check_fail_threshold) {
                         atomic_store(&backend->state, BACKEND_DOWN);
+                        printf("[HEALTH] Backend %s:%u marked DOWN after %u failed checks\n",
+                               backend->host, backend->port, fails);
                     }
                 }
             } else {
                 uint32_t fails = atomic_fetch_add(&backend->failed_conns, 1) + 1;
-                if (fails >= 10) {
+                if (fails >= lb->config.health_check_fail_threshold) {
                     atomic_store(&backend->state, BACKEND_DOWN);
+                    printf("[HEALTH] Backend %s:%u marked DOWN after %u failed checks\n",
+                           backend->host, backend->port, fails);
                 }
             }
 
