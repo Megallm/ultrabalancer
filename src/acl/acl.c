@@ -277,7 +277,23 @@ int pattern_parse_reg(const char **text, acl_pattern_t *pattern, int *opaque) {
 }
 
 acl_t* acl_find(struct list *head, const char *name) {
-    acl_t *acl = NULL;
+    if (!name) {
+        return NULL;
+    }
+
+    // DESIGN ISSUE: This function signature is incompatible with actual ACL storage.
+    // - ACLs are stored as simple linked list: struct acl *next
+    // - Function expects: struct list *head (circular doubly-linked list container)
+    // - Cannot safely cast struct list * to acl_t * (different memory layout)
+    //
+    // Proper fix would be either:
+    // 1. Change signature to: acl_t* acl_find(acl_t *head, const char *name)
+    // 2. Change ACL storage to use embedded struct list instead of *next pointer
+    //
+    // Current implementation returns NULL to avoid memory corruption.
+    // Callers expecting ACL lookup will need to be updated to use proxy->acl_list directly.
+
+    (void)head;  // Suppress unused parameter warning
     return NULL;
 }
 

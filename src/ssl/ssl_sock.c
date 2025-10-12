@@ -6,8 +6,15 @@
 #include <openssl/pem.h>
 
 static int ssl_initialized = 0;
+
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+// ENGINE API is only used in OpenSSL versions before 3.0
 static ENGINE *ssl_engines[32];
 static int ssl_engines_count = 0;
+#else
+// In OpenSSL 3.0+, we don't use engines
+static int ssl_engines_count = 0;
+#endif
 
 int ssl_sock_verify_cbk(int ok, X509_STORE_CTX *ctx);
 void ssl_sock_info_cbk(const SSL *ssl, int where, int ret);
@@ -27,6 +34,68 @@ static const tls_version_t tls_versions[] = {
     {NULL,       0,      0,               0}
 };
 
+// Get TLS version info by name
+const tls_version_t* ssl_get_version_info(const char *version_name) {
+    for (int i = 0; tls_versions[i].name != NULL; i++) {
+        if (strcmp(tls_versions[i].name, version_name) == 0) {
+            return &tls_versions[i];
+        }
+    }
+    return NULL;
+}
+
+// Set minimum TLS version for SSL context
+int ssl_ctx_set_min_version(SSL_CTX *ctx, const char *version) {
+    const tls_version_t *ver = ssl_get_version_info(version);
+    if (!ver) {
+        log_error("Unknown TLS version: %s", version);
+        return -1;
+    }
+
+    if (!SSL_CTX_set_min_proto_version(ctx, ver->min)) {
+        log_error("Failed to set minimum TLS version to %s", version);
+        return -1;
+    }
+
+    log_info("Set minimum TLS version to %s", version);
+    return 0;
+}
+
+// Set maximum TLS version for SSL context
+int ssl_ctx_set_max_version(SSL_CTX *ctx, const char *version) {
+    const tls_version_t *ver = ssl_get_version_info(version);
+    if (!ver) {
+        log_error("Unknown TLS version: %s", version);
+        return -1;
+    }
+
+    if (!SSL_CTX_set_max_proto_version(ctx, ver->max)) {
+        log_error("Failed to set maximum TLS version to %s", version);
+        return -1;
+    }
+
+    log_info("Set maximum TLS version to %s", version);
+    return 0;
+}
+
+// Get negotiated TLS version from active connection
+const char* ssl_get_negotiated_version(const SSL *ssl) {
+    if (!ssl) {
+        return "Unknown";
+    }
+
+    int version = SSL_version(ssl);
+
+    // Look up the version in our table
+    for (int i = 0; tls_versions[i].name != NULL; i++) {
+        if (tls_versions[i].min == version) {
+            return tls_versions[i].name;
+        }
+    }
+
+    return "Unknown";
+}
+
 int ssl_sock_init() {
     if (ssl_initialized)
         return 0;
@@ -36,8 +105,12 @@ int ssl_sock_init() {
     OpenSSL_add_all_algorithms();
     RAND_poll();
 
+    // OpenSSL 3.0+ has deprecated ENGINE API - these are no-ops in modern versions
+    // but we keep them for backward compatibility with older OpenSSL versions
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     ENGINE_load_builtin_engines();
     ENGINE_register_all_complete();
+#endif
 
     ssl_initialized = 1;
     return 0;
@@ -258,7 +331,8 @@ int ssl_sock_verify_cbk(int ok, X509_STORE_CTX *ctx) {
 }
 
 void ssl_sock_info_cbk(const SSL *ssl, int where, int ret) {
-    struct connection *conn = SSL_get_ex_data(ssl, 0);
+    // Connection tracking for future use
+    (void)SSL_get_ex_data(ssl, 0);
 
     if (where & SSL_CB_HANDSHAKE_START) {
         log_debug("SSL handshake started");
@@ -294,6 +368,8 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *priv) {
 }
 
 int ssl_init_single_engine(const char *engine_name) {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+    // ENGINE API is deprecated in OpenSSL 3.0+
     ENGINE *engine = ENGINE_by_id(engine_name);
 
     if (!engine) {
@@ -318,13 +394,21 @@ int ssl_init_single_engine(const char *engine_name) {
     log_info("SSL engine %s loaded successfully", engine_name);
 
     return 0;
+#else
+    // In OpenSSL 3.0+, use providers instead of engines
+    log_warning("ENGINE API is deprecated in OpenSSL 3.0+, engine '%s' not loaded", engine_name);
+    return -1;
+#endif
 }
 
 void ssl_free_engines() {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+    // ENGINE API is deprecated in OpenSSL 3.0+
     for (int i = 0; i < ssl_engines_count; i++) {
         ENGINE_finish(ssl_engines[i]);
         ENGINE_free(ssl_engines[i]);
     }
+#endif
     ssl_engines_count = 0;
 }
 

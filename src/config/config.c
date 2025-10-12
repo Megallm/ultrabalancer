@@ -26,7 +26,6 @@ typedef struct config_section {
 
 static int current_section = CFG_GLOBAL;
 static proxy_t *current_proxy = NULL;
-static server_t *current_server = NULL;
 
 static int parse_global(const char **args, int line) {
     if (strcmp(args[0], "daemon") == 0) {
@@ -113,11 +112,18 @@ static int parse_frontend(const char **args, int line) {
     }
 
     if (strcmp(args[0], "bind") == 0) {
-        char *addr = args[1];
+        char *addr_buf = strdup(args[1]);
+        if (!addr_buf) {
+            log_error("Failed to allocate memory for address at line %d", line);
+            return -1;
+        }
+
+        char *addr = addr_buf;
         char *port = strchr(addr, ':');
 
         if (!port) {
-            port = addr;
+            // No port separator found, entire string is the port
+            port = addr_buf;
             addr = "*";
         } else {
             *port++ = '\0';
@@ -126,6 +132,7 @@ static int parse_frontend(const char **args, int line) {
         listener_t *l = listener_new("frontend", addr, atoi(port));
         if (!l) {
             log_error("Failed to create listener at line %d", line);
+            free(addr_buf);
             return -1;
         }
 
@@ -142,6 +149,8 @@ static int parse_frontend(const char **args, int line) {
                 l->alpn_str = strdup(args[++i]);
             }
         }
+
+        free(addr_buf);
     } else if (strcmp(args[0], "acl") == 0) {
         acl_t *acl = calloc(1, sizeof(*acl));
         acl->name = strdup(args[1]);
@@ -200,7 +209,13 @@ static int parse_backend(const char **args, int line) {
             return -1;
         }
 
-        char *addr = args[2];
+        char *addr_buf = strdup(args[2]);
+        if (!addr_buf) {
+            log_error("Failed to allocate memory for server address at line %d", line);
+            return -1;
+        }
+
+        char *addr = addr_buf;
         char *port = strchr(addr, ':');
 
         if (port) {
@@ -239,6 +254,8 @@ static int parse_backend(const char **args, int line) {
 
         srv->next = current_proxy->servers;
         current_proxy->servers = srv;
+
+        free(addr_buf);
     } else if (strcmp(args[0], "option") == 0) {
         if (strcmp(args[1], "httpchk") == 0) {
             current_proxy->check_method = HTTP_METH_OPTIONS;
