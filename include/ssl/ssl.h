@@ -144,6 +144,6 @@ void ssl_free_engines();
 const tls_version_t* ssl_get_version_info(const char *version_name);
 int ssl_ctx_set_min_version(SSL_CTX *ctx, const char *version);
 int ssl_ctx_set_max_version(SSL_CTX *ctx, const char *version);
-const char* ssl_get_negotiated_version(SSL *ssl);
+const char* ssl_get_negotiated_version(const SSL *ssl);
 
 #endif

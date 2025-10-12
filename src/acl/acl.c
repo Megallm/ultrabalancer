@@ -277,13 +277,22 @@ int pattern_parse_reg(const char **text, acl_pattern_t *pattern, int *opaque) {
 }
 
 acl_t* acl_find(struct list *head, const char *name) {
-    // Search through the ACL list for a matching name
-    if (!head || !name) {
+    if (!name) {
         return NULL;
     }
 
-    // TODO: Implement proper ACL lookup when list traversal is needed
-    // For now, return NULL as ACLs are stored in proxy-specific lists
+    // The head parameter is currently unused as ACLs are stored in proxy->acl_list
+    // This function is called with known_acl which should be cast to acl_t*
+    // For now, we traverse assuming head can be cast to acl_t* for simple linked list
+    acl_t *acl = (acl_t *)head;
+
+    while (acl) {
+        if (acl->name && strcmp(acl->name, name) == 0) {
+            return acl;
+        }
+        acl = acl->next;
+    }
+
     return NULL;
 }
 

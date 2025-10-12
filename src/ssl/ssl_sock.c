@@ -79,7 +79,7 @@ int ssl_ctx_set_max_version(SSL_CTX *ctx, const char *version) {
 }
 
 // Get negotiated TLS version from active connection
-const char* ssl_get_negotiated_version(SSL *ssl) {
+const char* ssl_get_negotiated_version(const SSL *ssl) {
     if (!ssl) {
         return "Unknown";
     }
@@ -88,7 +88,7 @@ const char* ssl_get_negotiated_version(SSL *ssl) {
 
     // Look up the version in our table
     for (int i = 0; tls_versions[i].name != NULL; i++) {
-        if (tls_versions[i].min == version || tls_versions[i].max == version) {
+        if (tls_versions[i].min == version) {
             return tls_versions[i].name;
         }
     }
