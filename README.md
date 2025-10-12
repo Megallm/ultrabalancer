@@ -320,8 +320,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](docs/contributing.md) for
 
 ### Core Maintainer
 
-**Kira** - [GitHub](https://github.com/Bas3line)
-📧 Contact: [shubham@ghostlytics.org](mailto:shubham@ghostlytics.org)
+- **Kira** - [GitHub](https://github.com/Bas3line)
+- **Contact:** [kiraa@tuta.io](mailto:kiraa@tuta.io)
 
 ## 📄 License
 
