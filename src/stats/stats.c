@@ -22,6 +22,14 @@ static const char *field_names[STAT_PX_MAX] = {
     "comp_rsp", "lastsess", "qtime", "ctime", "rtime", "ttime"
 };
 
+// Get field name by index for CSV/JSON export
+const char* stats_get_field_name(int index) {
+    if (index >= 0 && index < STAT_PX_MAX) {
+        return field_names[index];
+    }
+    return "unknown";
+}
+
 int stats_fill_fe_stats(struct proxy *px, field_t *stats, int len) {
     if (len < STAT_PX_MAX) return -1;
 

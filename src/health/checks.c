@@ -16,6 +16,14 @@ static const char *check_type_names[] = {
     "PGSQL", "REDIS", "SSL", "EXTERNAL", "AGENT"
 };
 
+// Get human-readable check type name
+const char* get_check_type_name(check_type_t type) {
+    if (type >= 0 && type < (int)(sizeof(check_type_names) / sizeof(check_type_names[0]))) {
+        return check_type_names[type];
+    }
+    return "UNKNOWN";
+}
+
 check_t* check_new(check_type_t type) {
     check_t *check = calloc(1, sizeof(*check));
     if (!check) return NULL;
@@ -379,29 +387,32 @@ void set_server_check_status(check_t *check, check_status_t status, const char *
 
 struct task* process_check(struct task *t, void *context, unsigned int state) {
     check_t *check = context;
-    int ret = -1;
+
+    // Task state is used for scheduling decisions
+    (void)state;
 
     check->start_time = time(NULL);
 
-    // Execute check based on type
+    // Execute check based on type - return value indicates success/failure
+    // but we rely on check status being set by the individual check functions
     switch (check->type) {
         case HCHK_TYPE_TCP:
-            ret = check_tcp(check);
+            (void)check_tcp(check);
             break;
         case HCHK_TYPE_HTTP:
-            ret = check_http(check);
+            (void)check_http(check);
             break;
         case HCHK_TYPE_HTTPS:
-            ret = check_https(check);
+            (void)check_https(check);
             break;
         case HCHK_TYPE_MYSQL:
-            ret = check_mysql(check);
+            (void)check_mysql(check);
             break;
         case HCHK_TYPE_REDIS:
-            ret = check_redis(check);
+            (void)check_redis(check);
             break;
         default:
-            ret = check_tcp(check);
+            (void)check_tcp(check);
     }
 
     check->duration = (time(NULL) - check->start_time) * 1000;

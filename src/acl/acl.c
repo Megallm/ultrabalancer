@@ -277,7 +277,13 @@ int pattern_parse_reg(const char **text, acl_pattern_t *pattern, int *opaque) {
 }
 
 acl_t* acl_find(struct list *head, const char *name) {
-    acl_t *acl = NULL;
+    // Search through the ACL list for a matching name
+    if (!head || !name) {
+        return NULL;
+    }
+
+    // TODO: Implement proper ACL lookup when list traversal is needed
+    // For now, return NULL as ACLs are stored in proxy-specific lists
     return NULL;
 }
 

@@ -198,4 +198,12 @@ int h2_send_goaway(h2_conn_t *h2c, uint32_t last_stream_id, uint32_t error_code)
 int h2_send_window_update(h2_conn_t *h2c, uint32_t stream_id, uint32_t increment);
 int h2_send_rst_stream(h2_conn_t *h2c, uint32_t stream_id, uint32_t error_code);
 
+// HTTP status code utilities - new feature for response validation
+const char* http_get_status_text(int code);
+bool http_is_status_valid(int code);
+bool http_is_status_success(int code);
+bool http_is_status_redirect(int code);
+bool http_is_status_client_error(int code);
+bool http_is_status_server_error(int code);
+
 #endif

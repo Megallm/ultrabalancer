@@ -44,6 +44,46 @@ static const struct {
     {0, NULL}
 };
 
+// Get human-readable status text from code
+const char* http_get_status_text(int code) {
+    for (int i = 0; http_status_codes[i].text != NULL; i++) {
+        if (http_status_codes[i].code == code) {
+            return http_status_codes[i].text;
+        }
+    }
+    return "Unknown Status";
+}
+
+// Check if a status code is valid (exists in our table)
+bool http_is_status_valid(int code) {
+    for (int i = 0; http_status_codes[i].text != NULL; i++) {
+        if (http_status_codes[i].code == code) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Check if status code indicates success (2xx)
+bool http_is_status_success(int code) {
+    return code >= 200 && code < 300;
+}
+
+// Check if status code is a redirect (3xx)
+bool http_is_status_redirect(int code) {
+    return code >= 300 && code < 400;
+}
+
+// Check if status code is a client error (4xx)
+bool http_is_status_client_error(int code) {
+    return code >= 400 && code < 500;
+}
+
+// Check if status code is a server error (5xx)
+bool http_is_status_server_error(int code) {
+    return code >= 500 && code < 600;
+}
+
 int http_parse_request_line(http_msg_t *msg, char *data, size_t len) {
     char *p = data;
     char *end = data + len;
