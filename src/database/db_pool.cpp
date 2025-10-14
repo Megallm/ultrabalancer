@@ -288,6 +288,16 @@ void DatabasePool::cleanup_idle_connections() {
     }
 }
 
+ConnectionStatsSnapshot DatabasePool::get_stats() const noexcept {
+    return ConnectionStatsSnapshot{
+        stats_.total_acquired.load(),
+        stats_.total_released.load(),
+        stats_.total_created.load(),
+        stats_.total_closed.load(),
+        stats_.total_validation_failures.load()
+    };
+}
+
 std::string DatabasePool::get_stats_json() const {
     std::shared_lock lock(mutex_);
 
@@ -416,7 +426,7 @@ int db_pool_add_backend(db_pool_t* pool, const char* host, uint16_t port,
     auto* cpp_pool = static_cast<DatabasePool*>(pool->mutex);
     BackendRole cpp_role = (role == DB_BACKEND_PRIMARY) ? BackendRole::Primary : BackendRole::Replica;
 
-    cpp_pool->add_backend(host, port, cpp_role, protocol);
+    [[maybe_unused]] uint64_t backend_id = cpp_pool->add_backend(host, port, cpp_role, protocol);
     return 0;
 }
 
@@ -432,7 +442,7 @@ db_connection_t* db_pool_acquire(db_pool_t* pool, db_query_type_t query_type,
     auto result = cpp_pool->acquire(query_type, in_transaction, backend_opt);
     if (!result) return nullptr;
 
-    auto conn_ptr = result.value();
+    auto conn_ptr = std::move(result).value();
     db_connection_t* conn = (db_connection_t*)malloc(sizeof(db_connection_t));
     if (!conn) return nullptr;
 

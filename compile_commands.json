@@ -1,0 +1,142 @@
+[
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "g++ -c src/core/connection_pool.cpp -o obj/core/connection_pool.o -Iinclude -std=c++17 -Wall -Wextra -O2 -pthread",
+    "file": "src/core/connection_pool.cpp"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "g++ -c src/core/request_router.cpp -o obj/core/request_router.o -Iinclude -std=c++17 -Wall -Wextra -O2 -pthread",
+    "file": "src/core/request_router.cpp"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "g++ -c src/stats/metrics_aggregator.cpp -o obj/stats/metrics_aggregator.o -Iinclude -std=c++17 -Wall -Wextra -O2 -pthread",
+    "file": "src/stats/metrics_aggregator.cpp"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "g++ -c src/database/db_pool.cpp -o obj/database/db_pool.o -Iinclude -std=c++17 -Wall -Wextra -O2 -pthread",
+    "file": "src/database/db_pool.cpp"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/main.c -o obj/main.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/main.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/stick_tables.c -o obj/stick_tables.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/stick_tables.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/acl/acl.c -o obj/acl/acl.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/acl/acl.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/cache/cache.c -o obj/cache/cache.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/cache/cache.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/config/config.c -o obj/config/config.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/config/config.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/core/global.c -o obj/core/global.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/core/global.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/core/lb_core.c -o obj/core/lb_core.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/core/lb_core.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/core/listener.c -o obj/core/listener.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/core/listener.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/core/proxy.c -o obj/core/proxy.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/core/proxy.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/core/server.c -o obj/core/server.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/core/server.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/core/session.c -o obj/core/session.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/core/session.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/health/health.c -o obj/health/health.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/health/health.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/health/checks.c -o obj/health/checks.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/health/checks.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/http/http_parser.c -o obj/http/http_parser.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/http/http_parser.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/network/lb_net.c -o obj/network/lb_net.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/network/lb_net.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/network/lb_network.c -o obj/network/lb_network.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/network/lb_network.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/ssl/ssl_sock.c -o obj/ssl/ssl_sock.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/ssl/ssl_sock.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/stats/stats.c -o obj/stats/stats.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/stats/stats.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/utils/buffer.c -o obj/utils/buffer.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/utils/buffer.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/utils/log.c -o obj/utils/log.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/utils/log.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/utils/memory.c -o obj/utils/memory.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/utils/memory.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/database/db_protocol.c -o obj/database/db_protocol.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/database/db_protocol.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/database/db_router.c -o obj/database/db_router.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/database/db_router.c"
+  },
+  {
+    "directory": "/home/shubham/Documents/ultrabalancer",
+    "command": "gcc -c src/database/db_health.c -o obj/database/db_health.o -Iinclude -std=c2x -Wall -Wextra -O2 -pthread",
+    "file": "src/database/db_health.c"
+  }
+]

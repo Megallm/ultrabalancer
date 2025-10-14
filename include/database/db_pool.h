@@ -3,8 +3,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <time.h>
 #include "db_protocol.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef enum {
     DB_BACKEND_UNKNOWN = 0,
@@ -74,5 +79,9 @@ int db_pool_validate_connection(db_connection_t* conn);
 void db_pool_cleanup_idle(db_pool_t* pool);
 
 int db_pool_get_stats(db_pool_t* pool, char* buffer, size_t buffer_size);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -24,7 +25,7 @@ db_health_checker_t* db_health_checker_create(db_pool_t* pool,
     checker->check_interval_ms = check_interval_ms;
     checker->timeout_ms = timeout_ms;
     checker->max_lag_ms = max_lag_ms;
-    checker->running = false;
+    atomic_store(&checker->running, false);
 
     return checker;
 }
@@ -32,7 +33,7 @@ db_health_checker_t* db_health_checker_create(db_pool_t* pool,
 void db_health_checker_destroy(db_health_checker_t* checker) {
     if (!checker) return;
 
-    if (checker->running) {
+    if (atomic_load(&checker->running)) {
         db_health_checker_stop(checker);
     }
 
@@ -40,37 +41,25 @@ void db_health_checker_destroy(db_health_checker_t* checker) {
 }
 
 int db_health_checker_start(db_health_checker_t* checker) {
-    if (!checker || checker->running) return -1;
+    if (!checker || atomic_load(&checker->running)) return -1;
 
-    checker->running = true;
+    atomic_store(&checker->running, true);
 
-    pthread_t* thread = (pthread_t*)malloc(sizeof(pthread_t));
-    if (!thread) {
-        checker->running = false;
+    if (pthread_create(&checker->thread, NULL, db_health_check_thread, checker) != 0) {
+        atomic_store(&checker->running, false);
         return -1;
     }
 
-    if (pthread_create(thread, NULL, db_health_check_thread, checker) != 0) {
-        free(thread);
-        checker->running = false;
-        return -1;
-    }
-
-    checker->thread = thread;
     return 0;
 }
 
 void db_health_checker_stop(db_health_checker_t* checker) {
-    if (!checker || !checker->running) return;
+    if (!checker || !atomic_load(&checker->running)) return;
 
-    checker->running = false;
+    atomic_store(&checker->running, false);
 
-    pthread_t* thread = (pthread_t*)checker->thread;
-    if (thread) {
-        pthread_join(*thread, NULL);
-        free(thread);
-        checker->thread = NULL;
-    }
+    pthread_join(checker->thread, NULL);
+    checker->thread = 0;
 }
 
 static int db_health_check_tcp(const char* host, uint16_t port, uint32_t timeout_ms) {
@@ -150,34 +139,9 @@ static uint64_t db_health_check_postgresql_lag(const char* host, uint16_t port) 
 }
 
 static uint64_t db_health_check_mysql_lag(const char* host, uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return UINT64_MAX;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
-        close(fd);
-        return UINT64_MAX;
-    }
-
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return UINT64_MAX;
-    }
-
-    const char* query = "SHOW SLAVE STATUS;";
-    ssize_t sent = send(fd, query, strlen(query), 0);
-
-    if (sent <= 0) {
-        close(fd);
-        return 0;
-    }
-
-    close(fd);
-    return 0;
+    (void)host;
+    (void)port;
+    return UINT64_MAX;
 }
 
 int db_health_check_backend(db_backend_t* backend) {
@@ -227,12 +191,13 @@ uint64_t db_health_check_replication_lag(db_backend_t* backend) {
 static void* db_health_check_thread(void* arg) {
     db_health_checker_t* checker = (db_health_checker_t*)arg;
 
-    while (checker->running) {
+    while (atomic_load(&checker->running)) {
         pthread_mutex_t* mutex = (pthread_mutex_t*)checker->pool->mutex;
         pthread_mutex_lock(mutex);
 
         db_backend_t* backend = checker->pool->backends;
         while (backend) {
+            db_backend_t* next = backend->next;
             pthread_mutex_unlock(mutex);
 
             int health_result = db_health_check_backend(backend);
@@ -240,15 +205,17 @@ static void* db_health_check_thread(void* arg) {
             if (backend->role == DB_BACKEND_REPLICA && health_result == 0) {
                 uint64_t lag = db_health_check_replication_lag(backend);
 
+                pthread_mutex_lock(mutex);
                 if (lag > checker->max_lag_ms && backend->is_healthy) {
                     backend->is_healthy = false;
                 } else if (lag <= checker->max_lag_ms && !backend->is_healthy) {
                     backend->is_healthy = true;
                 }
+                pthread_mutex_unlock(mutex);
             }
 
             pthread_mutex_lock(mutex);
-            backend = backend->next;
+            backend = next;
         }
 
         pthread_mutex_unlock(mutex);
