@@ -60,12 +60,14 @@ STATS_SRCS = $(wildcard $(SRC_DIR)/stats/*.c)
 STATS_CXX_SRCS = $(wildcard $(SRC_DIR)/stats/*.cpp)
 UTILS_SRCS = $(wildcard $(SRC_DIR)/utils/*.c)
 CONFIG_SRCS = $(wildcard $(SRC_DIR)/config/*.c)
+DATABASE_SRCS = $(filter-out $(SRC_DIR)/database/db_pool.c, $(wildcard $(SRC_DIR)/database/*.c))
+DATABASE_CXX_SRCS = $(wildcard $(SRC_DIR)/database/*.cpp)
 
 ALL_SRCS = $(SRC_DIR)/main.c $(CORE_SRCS) $(NETWORK_SRCS) $(HTTP_SRCS) \
            $(SSL_SRCS) $(HEALTH_SRCS) $(ACL_SRCS) $(CACHE_SRCS) \
-           $(STATS_SRCS) $(UTILS_SRCS) $(CONFIG_SRCS)
+           $(STATS_SRCS) $(UTILS_SRCS) $(CONFIG_SRCS) $(DATABASE_SRCS)
 
-ALL_CXX_SRCS = $(CORE_CXX_SRCS) $(STATS_CXX_SRCS)
+ALL_CXX_SRCS = $(CORE_CXX_SRCS) $(STATS_CXX_SRCS) $(DATABASE_CXX_SRCS)
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(ALL_SRCS))
@@ -75,7 +77,7 @@ CXX_OBJS = $(patsubst $(SRC_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(ALL_CXX_SRCS))
 $(shell mkdir -p $(OBJ_DIR)/core $(OBJ_DIR)/network $(OBJ_DIR)/http \
                  $(OBJ_DIR)/ssl $(OBJ_DIR)/health $(OBJ_DIR)/acl \
                  $(OBJ_DIR)/cache $(OBJ_DIR)/stats $(OBJ_DIR)/utils \
-                 $(OBJ_DIR)/config $(BIN_DIR))
+                 $(OBJ_DIR)/config $(OBJ_DIR)/database $(BIN_DIR))
 
 # Default target
 all: $(BIN_DIR)/$(TARGET)
