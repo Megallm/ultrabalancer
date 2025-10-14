@@ -6,11 +6,25 @@
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <chrono>
 #include <optional>
 #include <variant>
 #include "db_protocol.h"
+
+template<typename E>
+class unexpected {
+    E error_;
+public:
+    explicit unexpected(E error) : error_(std::move(error)) {}
+    const E& value() const { return error_; }
+};
+
+template<typename E>
+unexpected<E> make_unexpected(E error) {
+    return unexpected<E>(std::move(error));
+}
 
 template<typename T, typename E>
 class expected {
@@ -37,19 +51,6 @@ public:
     const T* operator->() const { return &std::get<T>(data_); }
 };
 
-template<typename E>
-class unexpected {
-    E error_;
-public:
-    explicit unexpected(E error) : error_(std::move(error)) {}
-    const E& value() const { return error_; }
-};
-
-template<typename E>
-unexpected<E> make_unexpected(E error) {
-    return unexpected<E>(std::move(error));
-}
-
 namespace ultrabalancer {
 namespace database {
 
@@ -64,6 +65,14 @@ enum class BackendRole {
     Primary,
     Replica,
     Down
+};
+
+struct ConnectionStatsSnapshot {
+    uint64_t total_acquired;
+    uint64_t total_released;
+    uint64_t total_created;
+    uint64_t total_closed;
+    uint64_t total_validation_failures;
 };
 
 struct ConnectionStats {
@@ -161,7 +170,7 @@ public:
 
     void cleanup_idle_connections();
 
-    [[nodiscard]] ConnectionStats get_stats() const noexcept { return stats_; }
+    [[nodiscard]] ConnectionStatsSnapshot get_stats() const noexcept;
 
     [[nodiscard]] std::string get_stats_json() const;
 

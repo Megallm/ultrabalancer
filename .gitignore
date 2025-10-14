@@ -5,3 +5,9 @@ obj/
 obj
 .claude
 .cursor
+
+.clangd
+.clangd/
+.cache/
+test_database_lb.sh
+test_db_pool_runtime.c

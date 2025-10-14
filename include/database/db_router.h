@@ -5,6 +5,7 @@
 #include "db_pool.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <time.h>
 
 typedef struct {
     uint64_t session_id;
