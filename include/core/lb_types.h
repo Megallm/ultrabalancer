@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #ifdef __cplusplus
 #include <atomic>
-// For C++, use std::atomic directly without macros
+// For C++ we use std::atomic directly without macros
 #else
 #include <stdatomic.h>
 #endif
@@ -103,6 +103,18 @@ typedef struct backend {
     uint8_t __padding[CACHE_LINE_SIZE - (sizeof(void*) % CACHE_LINE_SIZE)];
 } backend_t;
 
+typedef enum {
+    SOCKET_TYPE_CLIENT,
+    SOCKET_TYPE_BACKEND,
+    SOCKET_TYPE_LISTEN
+} socket_type_t;
+
+typedef struct epoll_data_wrapper {
+    socket_type_t type;
+    void* conn;
+    int fd;
+} epoll_data_wrapper_t;
+
 typedef struct lb_connection {
     int client_fd;
     int backend_fd;
@@ -126,6 +138,9 @@ typedef struct lb_connection {
     bool keep_alive;
     bool is_websocket;
     bool is_http2;
+
+    epoll_data_wrapper_t* client_wrapper;
+    epoll_data_wrapper_t* backend_wrapper;
 } lb_connection_t;
 
 typedef struct {

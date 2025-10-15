@@ -6,6 +6,8 @@
 [![Performance](https://img.shields.io/badge/performance-1M%2B_RPS-orange.svg)]()
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Megallm/ultrabalancer?utm_source=oss&utm_medium=github&utm_campaign=Megallm%2Fultrabalancer&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
+> **🚀 [Beta Launch Guide](BETA-LAUNCH.md)** - Complete setup guide with CLI commands, algorithm examples, and production tips!
+
 ## What is UltraBalancer?
 
 UltraBalancer is a next-generation, high-performance load balancing framework designed for modern cloud-native applications. Built with a hybrid C/C++ architecture, it combines the raw performance of C with the flexibility and advanced features of modern C++17.

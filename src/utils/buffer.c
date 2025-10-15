@@ -30,6 +30,9 @@ int buffer_put(struct buffer *buf, const void *input, size_t len) {
     if (buf->data + len > buf->size)
         return -1;
 
+    // if (buf-> data + len > buf->size)
+    //    return -1;
+
     memcpy(buf->area + buf->data, input, len);
     buf->data += len;
 

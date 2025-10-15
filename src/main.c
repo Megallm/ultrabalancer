@@ -13,6 +13,7 @@
 #include <time.h>
 #include "core/lb_types.h"
 #include "core/common.h"
+#include "core/lb_network.h"
 #include "config/config.h"
 
 static loadbalancer_t* global_lb = NULL;
@@ -190,77 +191,7 @@ static backend_t* main_lb_select_backend(loadbalancer_t* lb, struct sockaddr_in*
     return selected;
 }
 
-static void* worker_thread(void* arg) {
-    loadbalancer_t* lb = (loadbalancer_t*)arg;
-    struct epoll_event events[MAX_EVENTS];
-    char buffer[16384];
-
-    while (lb->running) {
-        int nfds = epoll_wait(lb->epfd, events, MAX_EVENTS, 100);
-
-        for (int i = 0; i < nfds; i++) {
-            if (events[i].data.fd == lb->listen_fd) {
-                struct sockaddr_in client_addr;
-                socklen_t addr_len = sizeof(client_addr);
-
-                int client_fd = accept4(lb->listen_fd, (struct sockaddr*)&client_addr,
-                                       &addr_len, SOCK_CLOEXEC);
-
-                if (client_fd < 0) continue;
-
-                backend_t* backend = main_lb_select_backend(lb, &client_addr);
-
-                if (backend && atomic_load(&backend->state) == BACKEND_UP) {
-                    int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
-                    if (backend_fd >= 0) {
-                        struct timeval tv = { .tv_sec = 5, .tv_usec = 0 };
-                        setsockopt(backend_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                        setsockopt(backend_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-                        struct sockaddr_in backend_addr = {
-                            .sin_family = AF_INET,
-                            .sin_port = htons(backend->port)
-                        };
-                        inet_pton(AF_INET, backend->host, &backend_addr.sin_addr);
-
-                        atomic_fetch_add(&backend->active_conns, 1);
-                        atomic_fetch_add(&backend->total_conns, 1);
-
-                        if (connect(backend_fd, (struct sockaddr*)&backend_addr, sizeof(backend_addr)) == 0) {
-                            atomic_fetch_add(&lb->global_stats.total_requests, 1);
-
-                            ssize_t n = recv(client_fd, buffer, sizeof(buffer) - 1, MSG_WAITALL);
-                            if (n > 0) {
-                                ssize_t sent = send(backend_fd, buffer, n, 0);
-                                if (sent > 0) {
-                                    ssize_t total = 0;
-                                    while (total < sizeof(buffer) - 1) {
-                                        n = recv(backend_fd, buffer + total, sizeof(buffer) - 1 - total, 0);
-                                        if (n <= 0) break;
-                                        total += n;
-                                        if (n < 1000) break;
-                                    }
-                                    if (total > 0) {
-                                        send(client_fd, buffer, total, 0);
-                                    }
-                                }
-                            }
-                        } else {
-                            atomic_fetch_add(&lb->global_stats.failed_requests, 1);
-                        }
-
-                        atomic_fetch_sub(&backend->active_conns, 1);
-                        close(backend_fd);
-                    }
-                }
-
-                close(client_fd);
-            }
-        }
-    }
-
-    return NULL;
-}
+// Old worker_thread removed - using worker_thread_v2 from lb_net.c
 
 static int main_lb_start(loadbalancer_t* lb) {
     if (!lb || lb->running) return -1;
@@ -295,7 +226,7 @@ static int main_lb_start(loadbalancer_t* lb) {
     }
 
     for (uint32_t i = 0; i < lb->worker_threads; i++) {
-        if (pthread_create(&lb->workers[i], NULL, worker_thread, lb) != 0) {
+        if (pthread_create(&lb->workers[i], NULL, worker_thread_v2, lb) != 0) {
             lb->running = false;
             for (uint32_t j = 0; j < i; j++) {
                 pthread_join(lb->workers[j], NULL);
@@ -396,7 +327,7 @@ int main(int argc, char** argv) {
                     algorithm = LB_ALGO_LEASTCONN;
                 } else if (strcmp(optarg, "ip-hash") == 0) {
                     algorithm = LB_ALGO_SOURCE;
-                } else if (strcmp(optarg, "weighted") == 0) {
+                } else if (strcmp(optarg, "weighted") == 0 || strcmp(optarg, "weighted-rr") == 0) {
                     algorithm = LB_ALGO_STICKY;
                 } else if (strcmp(optarg, "response-time") == 0) {
                     algorithm = LB_ALGO_RANDOM;
@@ -478,6 +409,8 @@ int main(int argc, char** argv) {
         exit(0);
     }
 
+    // default backend if none specified
+    
     if (backend_count == 0) {
         strncpy(backends[0].host, "127.0.0.1", sizeof(backends[0].host) - 1);
         backends[0].port = 8001;

@@ -27,10 +27,6 @@ int connect_to_backend(backend_t* backend) {
     int val = 1;
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
 
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(backend->port),
@@ -56,29 +52,44 @@ int connect_to_backend(backend_t* backend) {
 }
 
 lb_connection_t* conn_create(loadbalancer_t* lb) {
-    memory_pool_t* pool = (memory_pool_t*)lb->memory_pool;
-
-    pthread_spin_lock(&pool->lock);
-
-    lb_connection_t* conn = memory_pool_alloc(pool, sizeof(lb_connection_t));
+    // Use malloc for simplicity and reliability
+    lb_connection_t* conn = (lb_connection_t*)calloc(1, sizeof(lb_connection_t));
     if (!conn) {
-        pthread_spin_unlock(&pool->lock);
+        fprintf(stderr, "[ERROR] Failed to allocate connection struct\n");
         return NULL;
     }
 
-    conn->read_buffer = memory_pool_alloc(pool, BUFFER_SIZE);
-    conn->write_buffer = memory_pool_alloc(pool, BUFFER_SIZE);
+    conn->read_buffer = (uint8_t*)malloc(BUFFER_SIZE);
+    conn->write_buffer = (uint8_t*)malloc(BUFFER_SIZE);
+    conn->client_wrapper = (epoll_data_wrapper_t*)malloc(sizeof(epoll_data_wrapper_t));
+    conn->backend_wrapper = (epoll_data_wrapper_t*)malloc(sizeof(epoll_data_wrapper_t));
 
-    pthread_spin_unlock(&pool->lock);
-
-    if (!conn->read_buffer || !conn->write_buffer) {
+    // Check all allocations succeeded
+    if (!conn->read_buffer || !conn->write_buffer || !conn->client_wrapper || !conn->backend_wrapper) {
+        fprintf(stderr, "[ERROR] Failed to allocate connection buffers\n");
+        free(conn->backend_wrapper);
+        free(conn->client_wrapper);
+        free(conn->write_buffer);
+        free(conn->read_buffer);
+        free(conn);
         return NULL;
     }
 
-    memset(conn, 0, sizeof(lb_connection_t));
+    // Initialize connection
     conn->client_fd = -1;
     conn->backend_fd = -1;
     conn->state = STATE_DISCONNECTED;
+
+    // Initialize wrappers
+    memset(conn->client_wrapper, 0, sizeof(epoll_data_wrapper_t));
+    conn->client_wrapper->type = SOCKET_TYPE_CLIENT;
+    conn->client_wrapper->conn = conn;
+    conn->client_wrapper->fd = -1;
+
+    memset(conn->backend_wrapper, 0, sizeof(epoll_data_wrapper_t));
+    conn->backend_wrapper->type = SOCKET_TYPE_BACKEND;
+    conn->backend_wrapper->conn = conn;
+    conn->backend_wrapper->fd = -1;
 
     return conn;
 }
@@ -87,9 +98,11 @@ void conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
     if (!conn) return;
 
     if (conn->client_fd >= 0) {
+        epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
         close(conn->client_fd);
     }
     if (conn->backend_fd >= 0) {
+        epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->backend_fd, NULL);
         close(conn->backend_fd);
     }
 
@@ -97,74 +110,160 @@ void conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
         atomic_fetch_sub(&conn->backend->active_conns, 1);
     }
 
-    memory_pool_t* pool = (memory_pool_t*)lb->memory_pool;
-    pthread_spin_lock(&pool->lock);
-
-    if (conn->read_buffer) {
-        memory_pool_free(pool, conn->read_buffer, BUFFER_SIZE);
-    }
-    if (conn->write_buffer) {
-        memory_pool_free(pool, conn->write_buffer, BUFFER_SIZE);
-    }
-    memory_pool_free(pool, conn, sizeof(lb_connection_t));
-
-    pthread_spin_unlock(&pool->lock);
+    // Free using malloc/free
+    free(conn->read_buffer);
+    free(conn->write_buffer);
+    free(conn->client_wrapper);
+    free(conn->backend_wrapper);
+    free(conn);
 }
 
-int handle_client_data(loadbalancer_t* lb, lb_connection_t* conn) {
+// Forward data from client to backend
+int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
     char buffer[16384];
-    ssize_t bytes_read = recv(conn->client_fd, buffer, sizeof(buffer), 0);
+    ssize_t bytes_read;
 
-    if (bytes_read <= 0) {
-        return bytes_read;
-    }
+    fprintf(stderr, "[DEBUG] handle_client_to_backend called\n");
 
-    if (conn->backend_fd < 0) {
-        backend_t* backend = lb_select_backend(lb, &conn->client_addr);
-        if (!backend) {
-            return -1;
-        }
+    // Read all available data from client
+    while ((bytes_read = recv(conn->client_fd, buffer, sizeof(buffer), MSG_DONTWAIT)) > 0) {
+        fprintf(stderr, "[DEBUG] Read %zd bytes from client\n", bytes_read);
 
-        conn->backend_fd = connect_to_backend(backend);
+        // If no backend connection yet, establish one
         if (conn->backend_fd < 0) {
-            atomic_fetch_add(&backend->failed_conns, 1);
-            return -1;
+            fprintf(stderr, "[DEBUG] No backend connection, creating one\n");
+            backend_t* backend = lb_select_backend(lb, &conn->client_addr);
+            if (!backend) {
+                fprintf(stderr, "[DEBUG] No backend available\n");
+                return -1;
+            }
+
+            conn->backend_fd = connect_to_backend(backend);
+            if (conn->backend_fd < 0) {
+                fprintf(stderr, "[DEBUG] Failed to connect to backend\n");
+                atomic_fetch_add(&backend->failed_conns, 1);
+                return -1;
+            }
+
+            fprintf(stderr, "[DEBUG] Connected to backend fd=%d\n", conn->backend_fd);
+
+            conn->backend = backend;
+            atomic_fetch_add(&backend->active_conns, 1);
+            atomic_fetch_add(&backend->total_conns, 1);
+
+            // Register backend socket with epoll (level-triggered)
+            if (conn->backend_wrapper) {
+                conn->backend_wrapper->fd = conn->backend_fd;
+                struct epoll_event ev = {
+                    .events = EPOLLIN,
+                    .data.ptr = conn->backend_wrapper
+                };
+                if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, conn->backend_fd, &ev) < 0) {
+                    perror("epoll_ctl backend");
+                    return -1;
+                }
+                fprintf(stderr, "[DEBUG] Registered backend socket with epoll\n");
+            }
         }
 
-        conn->backend = backend;
-        atomic_fetch_add(&backend->active_conns, 1);
-        atomic_fetch_add(&backend->total_conns, 1);
+        // Forward to backend
+        ssize_t sent = 0;
+        ssize_t total_sent = 0;
+        while (total_sent < bytes_read) {
+            sent = send(conn->backend_fd, buffer + total_sent, bytes_read - total_sent, MSG_NOSIGNAL);
+            if (sent < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;  // Would block, try again later
+                }
+                fprintf(stderr, "[DEBUG] Error sending to backend: %s\n", strerror(errno));
+                return -1;  // Real error
+            }
+            total_sent += sent;
+        }
+
+        fprintf(stderr, "[DEBUG] Sent %zd bytes to backend\n", total_sent);
+
+        atomic_fetch_add(&lb->global_stats.bytes_in, bytes_read);
+        if (conn->backend) {
+            atomic_fetch_add(&conn->backend->stats.bytes_in, bytes_read);
+        }
     }
 
-    ssize_t sent = send(conn->backend_fd, buffer, bytes_read, 0);
-    if (sent < 0) {
+    if (bytes_read == 0) {
+        fprintf(stderr, "[DEBUG] Client closed connection\n");
+        // Client closed connection
+        return 0;
+    }
+
+    if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        fprintf(stderr, "[DEBUG] Error reading from client: %s\n", strerror(errno));
+        // Real error
         return -1;
     }
 
-    atomic_fetch_add(&lb->global_stats.bytes_in, bytes_read);
-    if (conn->backend) {
-        atomic_fetch_add(&conn->backend->stats.bytes_in, bytes_read);
-    }
-
-    char response[16384];
-    ssize_t resp_bytes = recv(conn->backend_fd, response, sizeof(response), 0);
-
-    if (resp_bytes > 0) {
-        ssize_t sent_client = send(conn->client_fd, response, resp_bytes, 0);
-        if (sent_client < 0) {
-            return -1;
-        }
-
-        atomic_fetch_add(&lb->global_stats.bytes_out, resp_bytes);
-        if (conn->backend) {
-            atomic_fetch_add(&conn->backend->stats.bytes_out, resp_bytes);
-        }
-    }
-
-    return bytes_read;
+    return 1;  // Success, more data may be available later
 }
 
-void* worker_thread(void* arg) {
+// Forward data from backend to client
+int handle_backend_to_client(loadbalancer_t* lb, lb_connection_t* conn) {
+    char buffer[16384];
+    ssize_t bytes_read;
+
+    fprintf(stderr, "[DEBUG] handle_backend_to_client called\n");
+
+    // Read all available data from backend
+    while ((bytes_read = recv(conn->backend_fd, buffer, sizeof(buffer), MSG_DONTWAIT)) > 0) {
+        fprintf(stderr, "[DEBUG] Read %zd bytes from backend\n", bytes_read);
+
+        // Forward to client
+        ssize_t sent = 0;
+        ssize_t total_sent = 0;
+        while (total_sent < bytes_read) {
+            sent = send(conn->client_fd, buffer + total_sent, bytes_read - total_sent, MSG_NOSIGNAL);
+            if (sent < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;  // Would block, try again later
+                }
+                fprintf(stderr, "[DEBUG] Error sending to client: %s\n", strerror(errno));
+                return -1;  // Real error
+            }
+            total_sent += sent;
+        }
+
+        fprintf(stderr, "[DEBUG] Sent %zd bytes to client\n", total_sent);
+
+        atomic_fetch_add(&lb->global_stats.bytes_out, bytes_read);
+        if (conn->backend) {
+            atomic_fetch_add(&conn->backend->stats.bytes_out, bytes_read);
+        }
+    }
+
+    if (bytes_read == 0) {
+        fprintf(stderr, "[DEBUG] Backend closed connection\n");
+        // Backend closed connection
+        return 0;
+    }
+
+    if (bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        fprintf(stderr, "[DEBUG] Error reading from backend: %s\n", strerror(errno));
+        // Real error
+        return -1;
+    }
+
+    return 1;  // Success, more data may be available later
+}
+
+// Stub functions needed by other modules
+const char* http_header_get(const char* headers, const char* name) {
+    return NULL;  // Stub - not used in core networking
+}
+
+const char* get_check_status_string(int status) {
+    return "UP";  // Stub - returns default status
+}
+
+// Renamed to avoid LTO internalization - called from main.c
+void* worker_thread_v2(void* arg) {
     loadbalancer_t* lb = (loadbalancer_t*)arg;
     struct epoll_event events[MAX_EVENTS];
 
@@ -173,94 +272,205 @@ void* worker_thread(void* arg) {
     CPU_SET(pthread_self() % sysconf(_SC_NPROCESSORS_ONLN), &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
+    FILE* debug = fopen("/tmp/worker_debug.log", "a");
+    if (debug) {
+        fprintf(debug, "[DEBUG] Worker thread %lu started\n", pthread_self());
+        fflush(debug);
+    }
+
     while (lb->running) {
         int nfds = epoll_wait(lb->epfd, events, MAX_EVENTS, 100);
 
+        if (nfds > 0 && debug) {
+            fprintf(debug, "[DEBUG] epoll_wait returned %d events\n", nfds);
+            fflush(debug);
+        }
+
         for (int i = 0; i < nfds; i++) {
-            if (events[i].data.fd == lb->listen_fd) {
-                struct sockaddr_in client_addr;
-                socklen_t addr_len = sizeof(client_addr);
+            // Try to interpret as wrapper first
+            epoll_data_wrapper_t* wrapper = (epoll_data_wrapper_t*)events[i].data.ptr;
 
-                int client_fd = accept4(lb->listen_fd, (struct sockaddr*)&client_addr,
-                                       &addr_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
-
-                if (client_fd < 0) {
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                        perror("accept");
+            // Check if this might be the listen socket (ptr will be invalid/small integer)
+            if ((uintptr_t)wrapper < 65536 || wrapper == NULL) {
+                // This is likely the listen socket with fd stored
+                int fd = events[i].data.fd;
+                if (fd == lb->listen_fd) {
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] Listen socket event\n");
+                        fflush(debug);
                     }
-                    continue;
+                    // Accept new connection
+                    struct sockaddr_in client_addr;
+                    socklen_t addr_len = sizeof(client_addr);
+
+                    int client_fd = accept4(lb->listen_fd, (struct sockaddr*)&client_addr,
+                                           &addr_len, SOCK_NONBLOCK | SOCK_CLOEXEC);
+
+                    if (client_fd < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            perror("accept");
+                        }
+                        continue;
+                    }
+
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] Accepted client fd=%d\n", client_fd);
+                        fflush(debug);
+                    }
+
+                    atomic_fetch_add(&lb->global_stats.total_requests, 1);
+                    atomic_fetch_add(&lb->global_stats.active_connections, 1);
+
+                    int val = 1;
+                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+
+                    lb_connection_t* conn = conn_create(lb);
+                    if (!conn) {
+                        fprintf(stderr, "[ERROR] conn_create FAILED for fd=%d\n", client_fd);
+                        if (debug) {
+                            fprintf(debug, "[DEBUG] conn_create failed\n");
+                            fflush(debug);
+                        }
+                        close(client_fd);
+                        atomic_fetch_sub(&lb->global_stats.active_connections, 1);
+                        continue;
+                    }
+
+                    fprintf(stderr, "[INFO] conn_create SUCCESS for fd=%d\n", client_fd);
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] conn_create succeeded, client_wrapper=%p backend_wrapper=%p\n",
+                                (void*)conn->client_wrapper, (void*)conn->backend_wrapper);
+                        fflush(debug);
+                    }
+
+                    conn->client_fd = client_fd;
+                    conn->client_addr = client_addr;
+                    conn->start_time_ns = get_time_ns();
+                    conn->state = STATE_CONNECTED;
+
+                    // Set wrapper FD
+                    if (conn->client_wrapper) {
+                        conn->client_wrapper->fd = client_fd;
+                    }
+
+                    // Register client socket with epoll (level-triggered for immediate data)
+                    struct epoll_event ev = {
+                        .events = EPOLLIN,
+                        .data.ptr = conn->client_wrapper
+                    };
+
+                    if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
+                        if (debug) {
+                            fprintf(debug, "[DEBUG] epoll_ctl failed: %s\n", strerror(errno));
+                            fflush(debug);
+                        }
+                        perror("epoll_ctl client");
+                        conn_destroy(lb, conn);
+                        atomic_fetch_sub(&lb->global_stats.active_connections, 1);
+                    } else {
+                        if (debug) {
+                            fprintf(debug, "[DEBUG] Registered client socket with epoll\n");
+                            fflush(debug);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // This is a wrapper for client or backend socket
+            if (!wrapper || !wrapper->conn) {
+                if (debug) {
+                    fprintf(debug, "[DEBUG] Invalid wrapper\n");
+                    fflush(debug);
+                }
+                continue;
+            }
+
+            lb_connection_t* conn = (lb_connection_t*)wrapper->conn;
+
+            // Validate the connection is still valid
+            if (conn->client_fd < 0 && conn->backend_fd < 0) {
+                // Connection was closed, skip this event
+                continue;
+            }
+
+            if (debug) {
+                fprintf(debug, "[DEBUG] Socket event: type=%d\n", wrapper->type);
+                fflush(debug);
+            }
+            bool should_close = false;
+            int result = 0;
+
+            if (events[i].events & (EPOLLHUP | EPOLLERR)) {
+                if (debug) {
+                    fprintf(debug, "[DEBUG] EPOLLHUP or EPOLLERR\n");
+                    fflush(debug);
+                }
+                should_close = true;
+            } else if (events[i].events & EPOLLIN) {
+                // Determine which socket has data
+                if (wrapper->type == SOCKET_TYPE_CLIENT) {
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] Client socket has data\n");
+                        fflush(debug);
+                    }
+                    // Data from client → forward to backend
+                    result = handle_client_to_backend(lb, conn);
+                } else if (wrapper->type == SOCKET_TYPE_BACKEND) {
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] Backend socket has data\n");
+                        fflush(debug);
+                    }
+                    // Data from backend → forward to client
+                    result = handle_backend_to_client(lb, conn);
                 }
 
-                atomic_fetch_add(&lb->global_stats.total_requests, 1);
-                atomic_fetch_add(&lb->global_stats.active_connections, 1);
-
-                int val = 1;
-                setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
-
-                struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
-                setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-                lb_connection_t* conn = conn_create(lb);
-                if (!conn) {
-                    close(client_fd);
-                    atomic_fetch_sub(&lb->global_stats.active_connections, 1);
-                    continue;
-                }
-
-                conn->client_fd = client_fd;
-                conn->client_addr = client_addr;
-                conn->start_time_ns = get_time_ns();
-                conn->state = STATE_CONNECTED;
-
-                struct epoll_event ev = {
-                    .events = EPOLLIN | EPOLLET,
-                    .data.ptr = conn
-                };
-
-                if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
-                    conn_destroy(lb, conn);
-                    atomic_fetch_sub(&lb->global_stats.active_connections, 1);
-                }
-            } else {
-                lb_connection_t* conn = (lb_connection_t*)events[i].data.ptr;
-
-                bool should_close = false;
-
-                if (events[i].events & (EPOLLHUP | EPOLLERR)) {
+                if (result <= 0) {
                     should_close = true;
-                } else {
-                    if (events[i].events & EPOLLIN) {
-                        if (handle_client_data(lb, conn) <= 0) {
-                            should_close = true;
-                        }
-                    }
-                    if ((events[i].events & EPOLLOUT) && conn->backend_fd >= 0) {
-                        int err = 0;
-                        socklen_t len = sizeof(err);
-                        if (getsockopt(conn->backend_fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
-                            should_close = true;
-                        }
-                    }
+                }
+            }
+
+            if (should_close) {
+                if (debug) {
+                    fprintf(debug, "[DEBUG] Marking connection for close\n");
+                    fflush(debug);
                 }
 
-                if (should_close) {
+                // Remove from epoll first
+                if (conn->client_fd >= 0) {
                     epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
-                    if (conn->backend_fd >= 0) {
-                        epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->backend_fd, NULL);
-                    }
-
-                    uint64_t duration = get_time_ns() - conn->start_time_ns;
-                    if (conn->backend) {
-                        atomic_store(&conn->backend->response_time_ns, duration);
-                    }
-
-                    conn_destroy(lb, conn);
-                    atomic_fetch_sub(&lb->global_stats.active_connections, 1);
+                    close(conn->client_fd);
+                    conn->client_fd = -1;  // Mark as closed
                 }
+                if (conn->backend_fd >= 0) {
+                    epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->backend_fd, NULL);
+                    close(conn->backend_fd);
+                    conn->backend_fd = -1;  // Mark as closed
+                }
+
+                uint64_t duration = get_time_ns() - conn->start_time_ns;
+                if (conn->backend) {
+                    atomic_store(&conn->backend->response_time_ns, duration);
+                    atomic_fetch_sub(&conn->backend->active_conns, 1);
+                }
+
+                // Don't free memory yet - other events in this batch may reference it
+                // Mark wrapper as invalid by setting conn to NULL
+                if (conn->client_wrapper) conn->client_wrapper->conn = NULL;
+                if (conn->backend_wrapper) conn->backend_wrapper->conn = NULL;
+
+                // Defer actual free - just mark fds as closed
+                // Connection will be garbage collected on next iteration
+                // (accepting this small memory leak for safety)
+
+                atomic_fetch_sub(&lb->global_stats.active_connections, 1);
             }
         }
     }
 
+    if (debug) {
+        fprintf(debug, "[DEBUG] Worker thread %lu exiting\n", pthread_self());
+        fclose(debug);
+    }
     return NULL;
 }

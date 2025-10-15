@@ -14,5 +14,6 @@ int handle_client_data(loadbalancer_t* lb, lb_connection_t* conn);
 int handle_backend_data(loadbalancer_t* lb, lb_connection_t* conn);
 
 void* worker_thread(void* arg);
+void* worker_thread_v2(void* arg);
 
 #endif
