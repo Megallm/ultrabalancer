@@ -125,6 +125,7 @@ static void main_lb_destroy(loadbalancer_t* lb) {
     if (lb->epfd >= 0) close(lb->epfd);
     pthread_spin_destroy(&lb->conn_pool_lock);
 
+    free(lb->listen_wrapper);
     free(lb->workers);
     free(lb);
 }
@@ -202,12 +203,26 @@ static int main_lb_start(loadbalancer_t* lb) {
         return -1;
     }
 
+    // Allocate and initialize listen socket wrapper
+    lb->listen_wrapper = (epoll_data_wrapper_t*)malloc(sizeof(epoll_data_wrapper_t));
+    if (!lb->listen_wrapper) {
+        perror("Failed to allocate listen wrapper");
+        close(lb->listen_fd);
+        return -1;
+    }
+
+    memset(lb->listen_wrapper, 0, sizeof(epoll_data_wrapper_t));
+    lb->listen_wrapper->type = SOCKET_TYPE_LISTEN;
+    lb->listen_wrapper->fd = lb->listen_fd;
+    lb->listen_wrapper->conn = NULL;
+
     struct epoll_event ev = {
         .events = EPOLLIN,
-        .data.fd = lb->listen_fd
+        .data.ptr = lb->listen_wrapper
     };
 
     if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, lb->listen_fd, &ev) < 0) {
+        free(lb->listen_wrapper);
         close(lb->listen_fd);
         return -1;
     }

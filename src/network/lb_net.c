@@ -352,13 +352,125 @@ int handle_backend_to_client(loadbalancer_t* lb, lb_connection_t* conn) {
     return 1;  // Success, more data may be available later
 }
 
-// Stub functions needed by other modules
+// Parse HTTP headers: find a header by name (case-insensitive) and return pointer to its value
 const char* http_header_get(const char* headers, const char* name) {
-    return NULL;  // Stub - not used in core networking
+    if (!headers || !name) return NULL;
+
+    size_t name_len = strlen(name);
+    if (name_len == 0) return NULL;
+
+    const char* line = headers;
+
+    // Scan line by line
+    while (*line != '\0') {
+        // Find the start of the line (skip any leading whitespace)
+        while (*line == ' ' || *line == '\t') line++;
+
+        // Check if we're at the end
+        if (*line == '\0' || *line == '\r' || *line == '\n') {
+            // Empty line or end of headers
+            if (*line == '\r') line++;
+            if (*line == '\n') line++;
+            if (*line == '\0') break;
+            continue;
+        }
+
+        // Case-insensitive comparison of header name
+        const char* colon = strchr(line, ':');
+        if (!colon) {
+            // No colon found, skip to next line
+            while (*line != '\0' && *line != '\r' && *line != '\n') line++;
+            if (*line == '\r') line++;
+            if (*line == '\n') line++;
+            continue;
+        }
+
+        // Check if name matches (case-insensitive)
+        size_t line_name_len = colon - line;
+        if (line_name_len == name_len && strncasecmp(line, name, name_len) == 0) {
+            // Found the header, now extract the value
+            const char* value = colon + 1;
+
+            // Skip optional spaces after colon
+            while (*value == ' ' || *value == '\t') value++;
+
+            // Find end of value (CR/LF or end of string)
+            static char value_buffer[8192];
+            const char* value_end = value;
+            while (*value_end != '\0' && *value_end != '\r' && *value_end != '\n') {
+                value_end++;
+            }
+
+            // Trim trailing whitespace
+            while (value_end > value && (*(value_end - 1) == ' ' || *(value_end - 1) == '\t')) {
+                value_end--;
+            }
+
+            // Copy to buffer and return pointer
+            size_t value_len = value_end - value;
+            if (value_len >= sizeof(value_buffer)) {
+                value_len = sizeof(value_buffer) - 1;
+            }
+            memcpy(value_buffer, value, value_len);
+            value_buffer[value_len] = '\0';
+
+            return value_buffer;
+        }
+
+        // Move to next line
+        line = colon;
+        while (*line != '\0' && *line != '\r' && *line != '\n') line++;
+        if (*line == '\r') line++;
+        if (*line == '\n') line++;
+    }
+
+    return NULL;  // Header not found
 }
 
+// Map health check status codes to string representations
 const char* get_check_status_string(int status) {
-    return "UP";  // Stub - returns default status
+    switch (status) {
+        case 0:  // HCHK_STATUS_UNKNOWN or UP
+            return "UP";
+        case 1:  // DOWN
+            return "DOWN";
+        case 2:  // HCHK_STATUS_INI
+            return "INI";
+        case 3:  // HCHK_STATUS_UP
+            return "UP";
+        case 4:  // HCHK_STATUS_L4OK
+            return "L4OK";
+        case 5:  // HCHK_STATUS_L4TOUT
+            return "L4TOUT";
+        case 6:  // HCHK_STATUS_L4CON
+            return "L4CON";
+        case 7:  // HCHK_STATUS_L6OK
+            return "L6OK";
+        case 8:  // HCHK_STATUS_L6TOUT
+            return "L6TOUT";
+        case 9:  // HCHK_STATUS_L6RSP
+            return "L6RSP";
+        case 10: // HCHK_STATUS_L7OK
+            return "L7OK";
+        case 11: // HCHK_STATUS_L7TOUT
+            return "L7TOUT";
+        case 12: // HCHK_STATUS_L7RSP
+            return "L7RSP";
+        case 13: // HCHK_STATUS_L7OKC
+            return "L7OKC";
+        case 14: // HCHK_STATUS_L7STS
+            return "L7STS";
+        case 15: // HCHK_STATUS_PROCERR
+            return "PROCERR";
+        case 16: // HCHK_STATUS_PROCTOUT
+            return "PROCTOUT";
+        case 17: // HCHK_STATUS_PROCOK
+            return "PROCOK";
+        case 18: // HCHK_STATUS_HANA
+            return "HANA";
+        default:
+            return "UNKNOWN";
+    }
 }
 
 // Renamed to avoid LTO internalization - called from main.c
@@ -389,10 +501,10 @@ void* worker_thread_v2(void* arg) {
             // Try to interpret as wrapper first
             epoll_data_wrapper_t* wrapper = (epoll_data_wrapper_t*)events[i].data.ptr;
 
-            // Check if this might be the listen socket (ptr will be invalid/small integer)
-            if ((uintptr_t)wrapper < 65536 || wrapper == NULL) {
-                // This is likely the listen socket with fd stored
-                int fd = events[i].data.fd;
+            // Check if this is a valid wrapper and if it's the listen socket
+            if (wrapper && wrapper->type == SOCKET_TYPE_LISTEN) {
+                // This is the listen socket
+                int fd = wrapper->fd;
                 if (fd == lb->listen_fd) {
                     if (debug) {
                         fprintf(debug, "[DEBUG] Listen socket event\n");

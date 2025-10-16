@@ -194,6 +194,8 @@ typedef struct loadbalancer {
     void* consistent_hash;
 
     config_t config;
+
+    epoll_data_wrapper_t* listen_wrapper;
 } loadbalancer_t;
 
 #ifdef __cplusplus
