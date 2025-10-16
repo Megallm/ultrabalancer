@@ -14,6 +14,65 @@
 
 #define MAX_SPLICE_SIZE (64 * 1024)
 
+// Lock-free enqueue connection to cleanup queue
+static bool cleanup_queue_enqueue(cleanup_queue_t* queue, lb_connection_t* conn) {
+    if (!queue || !conn) return false;
+
+    uint32_t tail = atomic_load(&queue->tail);
+    uint32_t next_tail = (tail + 1) % CLEANUP_QUEUE_SIZE;
+    uint32_t head = atomic_load(&queue->head);
+
+    // Check if queue is full
+    if (next_tail == head) {
+        fprintf(stderr, "[WARN] Cleanup queue full, immediate free\n");
+        return false;
+    }
+
+    queue->queue[tail] = conn;
+    atomic_store(&queue->tail, next_tail);
+    return true;
+}
+
+// Lock-free dequeue connection from cleanup queue
+static lb_connection_t* cleanup_queue_dequeue(cleanup_queue_t* queue) {
+    if (!queue) return NULL;
+
+    uint32_t head = atomic_load(&queue->head);
+    uint32_t tail = atomic_load(&queue->tail);
+
+    // Check if queue is empty
+    if (head == tail) {
+        return NULL;
+    }
+
+    lb_connection_t* conn = queue->queue[head];
+    atomic_store(&queue->head, (head + 1) % CLEANUP_QUEUE_SIZE);
+    return conn;
+}
+
+// Process cleanup queue - drain and free all pending connections
+static void process_cleanup_queue(loadbalancer_t* lb) {
+    if (!lb || !lb->cleanup_queue) return;
+
+    lb_connection_t* conn;
+    int count = 0;
+    while ((conn = cleanup_queue_dequeue(lb->cleanup_queue)) != NULL) {
+        // Free all connection resources
+        free(conn->read_buffer);
+        free(conn->write_buffer);
+        free(conn->to_backend_buffer);
+        free(conn->to_client_buffer);
+        free(conn->client_wrapper);
+        free(conn->backend_wrapper);
+        free(conn);
+        count++;
+    }
+
+    if (count > 0) {
+        fprintf(stderr, "[DEBUG] Cleaned up %d deferred connections\n", count);
+    }
+}
+
 int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
@@ -395,7 +454,8 @@ const char* http_header_get(const char* headers, const char* name) {
             while (*value == ' ' || *value == '\t') value++;
 
             // Find end of value (CR/LF or end of string)
-            static char value_buffer[8192];
+            // Use thread-local storage to avoid races between threads
+            static _Thread_local char value_buffer[8192];
             const char* value_end = value;
             while (*value_end != '\0' && *value_end != '\r' && *value_end != '\n') {
                 value_end++;
@@ -490,6 +550,9 @@ void* worker_thread_v2(void* arg) {
     }
 
     while (lb->running) {
+        // Process cleanup queue before handling new events
+        process_cleanup_queue(lb);
+
         int nfds = epoll_wait(lb->epfd, events, MAX_EVENTS, 100);
 
         if (nfds > 0 && debug) {
@@ -683,14 +746,23 @@ void* worker_thread_v2(void* arg) {
                     atomic_fetch_sub(&conn->backend->active_conns, 1);
                 }
 
-                // Don't free memory yet - other events in this batch may reference it
-                // Mark wrapper as invalid by setting conn to NULL
+                // Enqueue connection for deferred cleanup
+                // Mark wrapper as invalid by setting conn to NULL to prevent use after this batch
                 if (conn->client_wrapper) conn->client_wrapper->conn = NULL;
                 if (conn->backend_wrapper) conn->backend_wrapper->conn = NULL;
 
-                // Defer actual free - just mark fds as closed
-                // Connection will be garbage collected on next iteration
-                // (accepting this small memory leak for safety)
+                // Enqueue for cleanup at the start of next iteration
+                if (!cleanup_queue_enqueue(lb->cleanup_queue, conn)) {
+                    // Queue full, free immediately
+                    fprintf(stderr, "[WARN] Cleanup queue full, freeing connection immediately\n");
+                    free(conn->read_buffer);
+                    free(conn->write_buffer);
+                    free(conn->to_backend_buffer);
+                    free(conn->to_client_buffer);
+                    free(conn->client_wrapper);
+                    free(conn->backend_wrapper);
+                    free(conn);
+                }
 
                 atomic_fetch_sub(&lb->global_stats.active_connections, 1);
             }

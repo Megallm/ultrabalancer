@@ -47,7 +47,7 @@ echo ""
 echo "Test 3: Some concurrent requests (5)"
 SUCCESS=0
 for i in {1..5}; do
-    (curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/ 2>&1 > /tmp/curl_$i.out && echo "200" > /tmp/curl_$i.status || echo "FAIL" > /tmp/curl_$i.status) &
+    (curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/ > /tmp/curl_$i.out 2>&1 && echo "200" > /tmp/curl_$i.status || echo "FAIL" > /tmp/curl_$i.status) &
 done
 wait
 

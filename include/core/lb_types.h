@@ -19,6 +19,7 @@
 #define BUFFER_SIZE 65536
 #define MAX_CONNECTIONS 1000000
 #define HTTP_HEADER_MAX 8192
+#define CLEANUP_QUEUE_SIZE 1024
 
 #ifdef __cplusplus
 extern "C" {
@@ -165,6 +166,17 @@ typedef struct {
     bool health_check_enabled;
 } config_t;
 
+typedef struct cleanup_queue {
+    lb_connection_t* queue[CLEANUP_QUEUE_SIZE];
+#ifdef __cplusplus
+    std::atomic<uint32_t> head;
+    std::atomic<uint32_t> tail;
+#else
+    _Atomic uint32_t head;
+    _Atomic uint32_t tail;
+#endif
+} cleanup_queue_t;
+
 typedef struct loadbalancer {
     int epfd;
     int listen_fd;
@@ -196,6 +208,7 @@ typedef struct loadbalancer {
     config_t config;
 
     epoll_data_wrapper_t* listen_wrapper;
+    cleanup_queue_t* cleanup_queue;
 } loadbalancer_t;
 
 #ifdef __cplusplus

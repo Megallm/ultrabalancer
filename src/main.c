@@ -105,6 +105,17 @@ static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
         return NULL;
     }
 
+    // Initialize cleanup queue
+    lb->cleanup_queue = calloc(1, sizeof(cleanup_queue_t));
+    if (!lb->cleanup_queue) {
+        munmap(lb->memory_pool, pool_size);
+        close(lb->epfd);
+        free(lb);
+        return NULL;
+    }
+    atomic_store(&lb->cleanup_queue->head, 0);
+    atomic_store(&lb->cleanup_queue->tail, 0);
+
     return lb;
 }
 
@@ -125,6 +136,7 @@ static void main_lb_destroy(loadbalancer_t* lb) {
     if (lb->epfd >= 0) close(lb->epfd);
     pthread_spin_destroy(&lb->conn_pool_lock);
 
+    free(lb->cleanup_queue);
     free(lb->listen_wrapper);
     free(lb->workers);
     free(lb);
