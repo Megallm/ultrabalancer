@@ -11,7 +11,3 @@ obj
 .cache/
 test_database_lb.sh
 test_db_pool_runtime.c
-
-battle_test.sh
-battle_test_custom.sh
-battle_test_custom_2.sh
