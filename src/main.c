@@ -113,6 +113,16 @@ static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
         free(lb);
         return NULL;
     }
+
+    // Initialize mutex for cleanup queue
+    if (pthread_mutex_init(&lb->cleanup_queue->lock, NULL) != 0) {
+        free(lb->cleanup_queue);
+        munmap(lb->memory_pool, pool_size);
+        close(lb->epfd);
+        free(lb);
+        return NULL;
+    }
+
     atomic_store(&lb->cleanup_queue->head, 0);
     atomic_store(&lb->cleanup_queue->tail, 0);
 
@@ -136,9 +146,25 @@ static void main_lb_destroy(loadbalancer_t* lb) {
     if (lb->epfd >= 0) close(lb->epfd);
     pthread_spin_destroy(&lb->conn_pool_lock);
 
-    free(lb->cleanup_queue);
-    free(lb->listen_wrapper);
-    free(lb->workers);
+    // Cleanup queue with mutex destruction
+    if (lb->cleanup_queue) {
+        pthread_mutex_destroy(&lb->cleanup_queue->lock);
+        free(lb->cleanup_queue);
+        lb->cleanup_queue = NULL;
+    }
+
+    // Cleanup listen wrapper
+    if (lb->listen_wrapper) {
+        free(lb->listen_wrapper);
+        lb->listen_wrapper = NULL;
+    }
+
+    // Cleanup workers
+    if (lb->workers) {
+        free(lb->workers);
+        lb->workers = NULL;
+    }
+
     free(lb);
 }
 
@@ -235,6 +261,7 @@ static int main_lb_start(loadbalancer_t* lb) {
 
     if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, lb->listen_fd, &ev) < 0) {
         free(lb->listen_wrapper);
+        lb->listen_wrapper = NULL;
         close(lb->listen_fd);
         return -1;
     }
@@ -259,6 +286,7 @@ static int main_lb_start(loadbalancer_t* lb) {
                 pthread_join(lb->workers[j], NULL);
             }
             free(lb->workers);
+            lb->workers = NULL;
             close(lb->listen_fd);
             return -1;
         }

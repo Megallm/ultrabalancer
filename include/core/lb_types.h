@@ -171,9 +171,11 @@ typedef struct cleanup_queue {
 #ifdef __cplusplus
     std::atomic<uint32_t> head;
     std::atomic<uint32_t> tail;
+    std::mutex lock;
 #else
     _Atomic uint32_t head;
     _Atomic uint32_t tail;
+    pthread_mutex_t lock;
 #endif
 } cleanup_queue_t;
 

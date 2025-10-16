@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,9 +15,11 @@
 
 #define MAX_SPLICE_SIZE (64 * 1024)
 
-// Lock-free enqueue connection to cleanup queue
+// Thread-safe enqueue connection to cleanup queue
 static bool cleanup_queue_enqueue(cleanup_queue_t* queue, lb_connection_t* conn) {
     if (!queue || !conn) return false;
+
+    pthread_mutex_lock(&queue->lock);
 
     uint32_t tail = atomic_load(&queue->tail);
     uint32_t next_tail = (tail + 1) % CLEANUP_QUEUE_SIZE;
@@ -24,29 +27,37 @@ static bool cleanup_queue_enqueue(cleanup_queue_t* queue, lb_connection_t* conn)
 
     // Check if queue is full
     if (next_tail == head) {
+        pthread_mutex_unlock(&queue->lock);
         fprintf(stderr, "[WARN] Cleanup queue full, immediate free\n");
         return false;
     }
 
     queue->queue[tail] = conn;
     atomic_store(&queue->tail, next_tail);
+
+    pthread_mutex_unlock(&queue->lock);
     return true;
 }
 
-// Lock-free dequeue connection from cleanup queue
+// Thread-safe dequeue connection from cleanup queue
 static lb_connection_t* cleanup_queue_dequeue(cleanup_queue_t* queue) {
     if (!queue) return NULL;
+
+    pthread_mutex_lock(&queue->lock);
 
     uint32_t head = atomic_load(&queue->head);
     uint32_t tail = atomic_load(&queue->tail);
 
     // Check if queue is empty
     if (head == tail) {
+        pthread_mutex_unlock(&queue->lock);
         return NULL;
     }
 
     lb_connection_t* conn = queue->queue[head];
     atomic_store(&queue->head, (head + 1) % CLEANUP_QUEUE_SIZE);
+
+    pthread_mutex_unlock(&queue->lock);
     return conn;
 }
 
@@ -73,13 +84,13 @@ static void process_cleanup_queue(loadbalancer_t* lb) {
     }
 }
 
-int set_nonblocking(int fd) {
+int lb_net_set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-int connect_to_backend(backend_t* backend) {
+static int lb_net_connect_to_backend(backend_t* backend) {
     int sockfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (sockfd < 0) return -1;
 
@@ -110,7 +121,7 @@ int connect_to_backend(backend_t* backend) {
     return sockfd;
 }
 
-lb_connection_t* conn_create(loadbalancer_t* lb) {
+static lb_connection_t* lb_net_conn_create(loadbalancer_t* lb) {
     // Use malloc for simplicity and reliability
     lb_connection_t* conn = (lb_connection_t*)calloc(1, sizeof(lb_connection_t));
     if (!conn) {
@@ -157,7 +168,7 @@ lb_connection_t* conn_create(loadbalancer_t* lb) {
     return conn;
 }
 
-void conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
+static void lb_net_conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
     if (!conn) return;
 
     if (conn->client_fd >= 0) {
@@ -227,7 +238,7 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
                 return -1;
             }
 
-            conn->backend_fd = connect_to_backend(backend);
+            conn->backend_fd = lb_net_connect_to_backend(backend);
             if (conn->backend_fd < 0) {
                 fprintf(stderr, "[DEBUG] Failed to connect to backend\n");
                 atomic_fetch_add(&backend->failed_conns, 1);
@@ -598,11 +609,11 @@ void* worker_thread_v2(void* arg) {
                     int val = 1;
                     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
 
-                    lb_connection_t* conn = conn_create(lb);
+                    lb_connection_t* conn = lb_net_conn_create(lb);
                     if (!conn) {
-                        fprintf(stderr, "[ERROR] conn_create FAILED for fd=%d\n", client_fd);
+                        fprintf(stderr, "[ERROR] lb_net_conn_create FAILED for fd=%d\n", client_fd);
                         if (debug) {
-                            fprintf(debug, "[DEBUG] conn_create failed\n");
+                            fprintf(debug, "[DEBUG] lb_net_conn_create failed\n");
                             fflush(debug);
                         }
                         close(client_fd);
@@ -610,9 +621,9 @@ void* worker_thread_v2(void* arg) {
                         continue;
                     }
 
-                    fprintf(stderr, "[INFO] conn_create SUCCESS for fd=%d\n", client_fd);
+                    fprintf(stderr, "[INFO] lb_net_conn_create SUCCESS for fd=%d\n", client_fd);
                     if (debug) {
-                        fprintf(debug, "[DEBUG] conn_create succeeded, client_wrapper=%p backend_wrapper=%p\n",
+                        fprintf(debug, "[DEBUG] lb_net_conn_create succeeded, client_wrapper=%p backend_wrapper=%p\n",
                                 (void*)conn->client_wrapper, (void*)conn->backend_wrapper);
                         fflush(debug);
                     }
@@ -639,7 +650,7 @@ void* worker_thread_v2(void* arg) {
                             fflush(debug);
                         }
                         perror("epoll_ctl client");
-                        conn_destroy(lb, conn);
+                        lb_net_conn_destroy(lb, conn);
                         atomic_fetch_sub(&lb->global_stats.active_connections, 1);
                     } else {
                         if (debug) {
