@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #ifdef __cplusplus
 #include <atomic>
-// For C++, use std::atomic directly without macros
+// For C++ we use std::atomic directly without macros
 #else
 #include <stdatomic.h>
 #endif
@@ -19,6 +19,7 @@
 #define BUFFER_SIZE 65536
 #define MAX_CONNECTIONS 1000000
 #define HTTP_HEADER_MAX 8192
+#define CLEANUP_QUEUE_SIZE 1024
 
 #ifdef __cplusplus
 extern "C" {
@@ -103,6 +104,18 @@ typedef struct backend {
     uint8_t __padding[CACHE_LINE_SIZE - (sizeof(void*) % CACHE_LINE_SIZE)];
 } backend_t;
 
+typedef enum {
+    SOCKET_TYPE_CLIENT,
+    SOCKET_TYPE_BACKEND,
+    SOCKET_TYPE_LISTEN
+} socket_type_t;
+
+typedef struct epoll_data_wrapper {
+    socket_type_t type;
+    void* conn;
+    int fd;
+} epoll_data_wrapper_t;
+
 typedef struct lb_connection {
     int client_fd;
     int backend_fd;
@@ -117,6 +130,14 @@ typedef struct lb_connection {
     size_t read_size;
     size_t write_size;
 
+    uint8_t* to_backend_buffer;
+    size_t to_backend_size;
+    size_t to_backend_capacity;
+
+    uint8_t* to_client_buffer;
+    size_t to_client_size;
+    size_t to_client_capacity;
+
     uint64_t start_time_ns;
     struct sockaddr_in client_addr;
 
@@ -126,6 +147,9 @@ typedef struct lb_connection {
     bool keep_alive;
     bool is_websocket;
     bool is_http2;
+
+    epoll_data_wrapper_t* client_wrapper;
+    epoll_data_wrapper_t* backend_wrapper;
 } lb_connection_t;
 
 typedef struct {
@@ -141,6 +165,19 @@ typedef struct {
     bool defer_accept;
     bool health_check_enabled;
 } config_t;
+
+typedef struct cleanup_queue {
+    lb_connection_t* queue[CLEANUP_QUEUE_SIZE];
+#ifdef __cplusplus
+    std::atomic<uint32_t> head;
+    std::atomic<uint32_t> tail;
+    std::mutex lock;
+#else
+    _Atomic uint32_t head;
+    _Atomic uint32_t tail;
+    pthread_mutex_t lock;
+#endif
+} cleanup_queue_t;
 
 typedef struct loadbalancer {
     int epfd;
@@ -171,6 +208,9 @@ typedef struct loadbalancer {
     void* consistent_hash;
 
     config_t config;
+
+    epoll_data_wrapper_t* listen_wrapper;
+    cleanup_queue_t* cleanup_queue;
 } loadbalancer_t;
 
 #ifdef __cplusplus
