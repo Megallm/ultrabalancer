@@ -129,6 +129,14 @@ typedef struct lb_connection {
     size_t read_size;
     size_t write_size;
 
+    uint8_t* to_backend_buffer;
+    size_t to_backend_size;
+    size_t to_backend_capacity;
+
+    uint8_t* to_client_buffer;
+    size_t to_client_size;
+    size_t to_client_capacity;
+
     uint64_t start_time_ns;
     struct sockaddr_in client_addr;
 

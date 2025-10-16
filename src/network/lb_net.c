@@ -75,12 +75,16 @@ lb_connection_t* conn_create(loadbalancer_t* lb) {
         return NULL;
     }
 
-    // Initialize connection
     conn->client_fd = -1;
     conn->backend_fd = -1;
     conn->state = STATE_DISCONNECTED;
+    conn->to_backend_buffer = NULL;
+    conn->to_backend_size = 0;
+    conn->to_backend_capacity = 0;
+    conn->to_client_buffer = NULL;
+    conn->to_client_size = 0;
+    conn->to_client_capacity = 0;
 
-    // Initialize wrappers
     memset(conn->client_wrapper, 0, sizeof(epoll_data_wrapper_t));
     conn->client_wrapper->type = SOCKET_TYPE_CLIENT;
     conn->client_wrapper->conn = conn;
@@ -110,9 +114,10 @@ void conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
         atomic_fetch_sub(&conn->backend->active_conns, 1);
     }
 
-    // Free using malloc/free
     free(conn->read_buffer);
     free(conn->write_buffer);
+    free(conn->to_backend_buffer);
+    free(conn->to_client_buffer);
     free(conn->client_wrapper);
     free(conn->backend_wrapper);
     free(conn);
@@ -124,6 +129,31 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
     ssize_t bytes_read;
 
     fprintf(stderr, "[DEBUG] handle_client_to_backend called\n");
+
+    if (conn->to_backend_size > 0 && conn->backend_fd >= 0) {
+        ssize_t sent = send(conn->backend_fd, conn->to_backend_buffer, conn->to_backend_size, MSG_NOSIGNAL);
+        if (sent > 0) {
+            if ((size_t)sent < conn->to_backend_size) {
+                memmove(conn->to_backend_buffer, conn->to_backend_buffer + sent, conn->to_backend_size - sent);
+            }
+            conn->to_backend_size -= sent;
+            atomic_fetch_add(&lb->global_stats.bytes_in, sent);
+            if (conn->backend) {
+                atomic_fetch_add(&conn->backend->stats.bytes_in, sent);
+            }
+        } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            fprintf(stderr, "[DEBUG] Error flushing to backend: %s\n", strerror(errno));
+            return -1;
+        }
+
+        if (conn->to_backend_size == 0) {
+            struct epoll_event ev = {
+                .events = EPOLLIN,
+                .data.ptr = conn->backend_wrapper
+            };
+            epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->backend_fd, &ev);
+        }
+    }
 
     // Read all available data from client
     while ((bytes_read = recv(conn->client_fd, buffer, sizeof(buffer), MSG_DONTWAIT)) > 0) {
@@ -181,11 +211,33 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
             total_sent += sent;
         }
 
+        if (total_sent < bytes_read) {
+            size_t remaining = bytes_read - total_sent;
+            if (conn->to_backend_capacity < conn->to_backend_size + remaining) {
+                size_t new_cap = (conn->to_backend_size + remaining) * 2;
+                uint8_t* new_buf = (uint8_t*)realloc(conn->to_backend_buffer, new_cap);
+                if (!new_buf) {
+                    fprintf(stderr, "[DEBUG] Failed to allocate to_backend_buffer\n");
+                    return -1;
+                }
+                conn->to_backend_buffer = new_buf;
+                conn->to_backend_capacity = new_cap;
+            }
+            memcpy(conn->to_backend_buffer + conn->to_backend_size, buffer + total_sent, remaining);
+            conn->to_backend_size += remaining;
+
+            struct epoll_event ev = {
+                .events = EPOLLIN | EPOLLOUT,
+                .data.ptr = conn->backend_wrapper
+            };
+            epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->backend_fd, &ev);
+        }
+
         fprintf(stderr, "[DEBUG] Sent %zd bytes to backend\n", total_sent);
 
-        atomic_fetch_add(&lb->global_stats.bytes_in, bytes_read);
+        atomic_fetch_add(&lb->global_stats.bytes_in, total_sent);
         if (conn->backend) {
-            atomic_fetch_add(&conn->backend->stats.bytes_in, bytes_read);
+            atomic_fetch_add(&conn->backend->stats.bytes_in, total_sent);
         }
     }
 
@@ -211,6 +263,31 @@ int handle_backend_to_client(loadbalancer_t* lb, lb_connection_t* conn) {
 
     fprintf(stderr, "[DEBUG] handle_backend_to_client called\n");
 
+    if (conn->to_client_size > 0) {
+        ssize_t sent = send(conn->client_fd, conn->to_client_buffer, conn->to_client_size, MSG_NOSIGNAL);
+        if (sent > 0) {
+            if ((size_t)sent < conn->to_client_size) {
+                memmove(conn->to_client_buffer, conn->to_client_buffer + sent, conn->to_client_size - sent);
+            }
+            conn->to_client_size -= sent;
+            atomic_fetch_add(&lb->global_stats.bytes_out, sent);
+            if (conn->backend) {
+                atomic_fetch_add(&conn->backend->stats.bytes_out, sent);
+            }
+        } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            fprintf(stderr, "[DEBUG] Error flushing to client: %s\n", strerror(errno));
+            return -1;
+        }
+
+        if (conn->to_client_size == 0) {
+            struct epoll_event ev = {
+                .events = EPOLLIN,
+                .data.ptr = conn->client_wrapper
+            };
+            epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->client_fd, &ev);
+        }
+    }
+
     // Read all available data from backend
     while ((bytes_read = recv(conn->backend_fd, buffer, sizeof(buffer), MSG_DONTWAIT)) > 0) {
         fprintf(stderr, "[DEBUG] Read %zd bytes from backend\n", bytes_read);
@@ -230,11 +307,33 @@ int handle_backend_to_client(loadbalancer_t* lb, lb_connection_t* conn) {
             total_sent += sent;
         }
 
+        if (total_sent < bytes_read) {
+            size_t remaining = bytes_read - total_sent;
+            if (conn->to_client_capacity < conn->to_client_size + remaining) {
+                size_t new_cap = (conn->to_client_size + remaining) * 2;
+                uint8_t* new_buf = (uint8_t*)realloc(conn->to_client_buffer, new_cap);
+                if (!new_buf) {
+                    fprintf(stderr, "[DEBUG] Failed to allocate to_client_buffer\n");
+                    return -1;
+                }
+                conn->to_client_buffer = new_buf;
+                conn->to_client_capacity = new_cap;
+            }
+            memcpy(conn->to_client_buffer + conn->to_client_size, buffer + total_sent, remaining);
+            conn->to_client_size += remaining;
+
+            struct epoll_event ev = {
+                .events = EPOLLIN | EPOLLOUT,
+                .data.ptr = conn->client_wrapper
+            };
+            epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->client_fd, &ev);
+        }
+
         fprintf(stderr, "[DEBUG] Sent %zd bytes to client\n", total_sent);
 
-        atomic_fetch_add(&lb->global_stats.bytes_out, bytes_read);
+        atomic_fetch_add(&lb->global_stats.bytes_out, total_sent);
         if (conn->backend) {
-            atomic_fetch_add(&conn->backend->stats.bytes_out, bytes_read);
+            atomic_fetch_add(&conn->backend->stats.bytes_out, total_sent);
         }
     }
 
@@ -407,6 +506,24 @@ void* worker_thread_v2(void* arg) {
                     fflush(debug);
                 }
                 should_close = true;
+            } else if (events[i].events & EPOLLOUT) {
+                if (wrapper->type == SOCKET_TYPE_CLIENT) {
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] Client socket writable\n");
+                        fflush(debug);
+                    }
+                    result = handle_backend_to_client(lb, conn);
+                } else if (wrapper->type == SOCKET_TYPE_BACKEND) {
+                    if (debug) {
+                        fprintf(debug, "[DEBUG] Backend socket writable\n");
+                        fflush(debug);
+                    }
+                    result = handle_client_to_backend(lb, conn);
+                }
+
+                if (result <= 0) {
+                    should_close = true;
+                }
             } else if (events[i].events & EPOLLIN) {
                 // Determine which socket has data
                 if (wrapper->type == SOCKET_TYPE_CLIENT) {
