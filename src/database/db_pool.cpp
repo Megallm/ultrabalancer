@@ -237,7 +237,8 @@ void DatabasePool::release(std::unique_ptr<Connection> conn) {
         backend->decrement_connections();
     }
 
-    if (!conn->validate() || conn->idle_time() > idle_timeout_) {
+    // Check both idle time and age to ensure connections don't become stale
+    if (!conn->validate() || conn->idle_time() > idle_timeout_ || conn->age() > max_lifetime_) {
         total_connections_.fetch_sub(1);
         stats_.total_closed.fetch_add(1);
         return;
@@ -455,7 +456,11 @@ db_connection_t* db_pool_acquire(db_pool_t* pool, db_query_type_t query_type,
     conn->last_used = time(nullptr);
     conn->query_count = 0;
     conn->next = nullptr;
-    conn->backend_role = DB_BACKEND_PRIMARY;
+
+    // Fix: Properly get backend role instead of hardcoding to PRIMARY
+    auto* backend = cpp_pool->get_backend_by_id(conn->backend_id);
+    conn->backend_role = (backend && backend->role() == BackendRole::Primary) ?
+                         DB_BACKEND_PRIMARY : DB_BACKEND_REPLICA;
 
     return conn;
 }

@@ -16,6 +16,8 @@
 #include "core/lb_network.h"
 #include "config/config.h"
 
+#define MEMORY_POOL_SIZE (256 * 1024 * 1024)  // 256MB
+
 static loadbalancer_t* global_lb = NULL;
 
 static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm);
@@ -96,8 +98,7 @@ static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
     }
 
     // Initialize memory pool
-    size_t pool_size = 256 * 1024 * 1024; // 256MB
-    lb->memory_pool = mmap(NULL, pool_size, PROT_READ | PROT_WRITE,
+    lb->memory_pool = mmap(NULL, MEMORY_POOL_SIZE, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (lb->memory_pool == MAP_FAILED) {
         close(lb->epfd);
@@ -108,7 +109,7 @@ static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
     // Initialize cleanup queue
     lb->cleanup_queue = calloc(1, sizeof(cleanup_queue_t));
     if (!lb->cleanup_queue) {
-        munmap(lb->memory_pool, pool_size);
+        munmap(lb->memory_pool, MEMORY_POOL_SIZE);
         close(lb->epfd);
         free(lb);
         return NULL;
@@ -117,7 +118,7 @@ static loadbalancer_t* main_lb_create(uint16_t port, lb_algorithm_t algorithm) {
     // Initialize mutex for cleanup queue
     if (pthread_mutex_init(&lb->cleanup_queue->lock, NULL) != 0) {
         free(lb->cleanup_queue);
-        munmap(lb->memory_pool, pool_size);
+        munmap(lb->memory_pool, MEMORY_POOL_SIZE);
         close(lb->epfd);
         free(lb);
         return NULL;
@@ -140,7 +141,7 @@ static void main_lb_destroy(loadbalancer_t* lb) {
     }
 
     if (lb->memory_pool && lb->memory_pool != MAP_FAILED) {
-        munmap(lb->memory_pool, 256 * 1024 * 1024);
+        munmap(lb->memory_pool, MEMORY_POOL_SIZE);
     }
 
     if (lb->epfd >= 0) close(lb->epfd);
@@ -196,6 +197,8 @@ static backend_t* main_lb_select_backend(loadbalancer_t* lb, struct sockaddr_in*
 
     switch (lb->algorithm) {
         case LB_ALGO_ROUNDROBIN: {
+            if (lb->backend_count == 0) return NULL;  // Prevent division by zero
+
             uint32_t attempts = 0;
             while (attempts < lb->backend_count) {
                 uint32_t idx = atomic_fetch_add(&lb->round_robin_idx, 1) % lb->backend_count;
@@ -209,6 +212,8 @@ static backend_t* main_lb_select_backend(loadbalancer_t* lb, struct sockaddr_in*
         }
 
         case LB_ALGO_LEASTCONN: {
+            if (lb->backend_count == 0) return NULL;  // No backends available
+
             for (uint32_t i = 0; i < lb->backend_count; i++) {
                 backend_t* b = lb->backends[i];
                 if (b && atomic_load(&b->state) == BACKEND_UP) {
@@ -224,7 +229,8 @@ static backend_t* main_lb_select_backend(loadbalancer_t* lb, struct sockaddr_in*
 
         default:
             // Default to round-robin
-            return lb->backends[lb->round_robin_idx++ % lb->backend_count];
+            if (lb->backend_count == 0) return NULL;
+            return lb->backends[atomic_fetch_add(&lb->round_robin_idx, 1) % lb->backend_count];
     }
 
     return selected;

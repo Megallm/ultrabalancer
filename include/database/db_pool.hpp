@@ -174,11 +174,12 @@ public:
 
     [[nodiscard]] std::string get_stats_json() const;
 
+    [[nodiscard]] Backend* get_backend_by_id(uint64_t id);
+
 private:
     [[nodiscard]] std::unique_ptr<Connection> create_new_connection(Backend* backend);
     [[nodiscard]] Backend* select_primary();
     [[nodiscard]] Backend* select_replica();
-    [[nodiscard]] Backend* get_backend_by_id(uint64_t id);
 
     std::vector<std::unique_ptr<Backend>> backends_;
     std::unordered_map<uint64_t, std::vector<std::unique_ptr<Connection>>> idle_connections_;

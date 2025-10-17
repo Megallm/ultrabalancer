@@ -55,16 +55,20 @@ static db_session_t* db_router_create_session(db_router_t* router, uint64_t sess
     if (router->session_count >= router->max_sessions) {
         time_t oldest_time = time(NULL);
         uint32_t oldest_idx = 0;
+        bool found_non_transaction = false;
 
+        // Find oldest session not in transaction
         for (uint32_t i = 0; i < router->session_count; i++) {
             if (!router->sessions[i].in_transaction &&
                 router->sessions[i].last_activity < oldest_time) {
                 oldest_time = router->sessions[i].last_activity;
                 oldest_idx = i;
+                found_non_transaction = true;
             }
         }
 
-        if (oldest_time < time(NULL) - 300) {
+        // Always evict oldest session when at max capacity (changed from 300s check)
+        if (found_non_transaction) {
             router->sessions[oldest_idx].session_id = session_id;
             router->sessions[oldest_idx].backend_id = 0;
             router->sessions[oldest_idx].in_transaction = false;
@@ -72,7 +76,7 @@ static db_session_t* db_router_create_session(db_router_t* router, uint64_t sess
             return &router->sessions[oldest_idx];
         }
 
-        return NULL;
+        return NULL;  // All sessions in transaction
     }
 
     db_session_t* session = &router->sessions[router->session_count++];
@@ -138,16 +142,16 @@ db_connection_t* db_router_route_query(db_router_t* router,
         session->last_activity = time(NULL);
     }
 
-    pthread_mutex_unlock(mutex);
-
+    // Keep mutex locked while acquiring connection to prevent race condition
     db_connection_t* conn = db_pool_acquire(router->pool, query_info.query_type,
                                              in_transaction, backend_id);
 
+    // Update session backend_id if it was just created
     if (conn && session && session->backend_id == 0) {
-        pthread_mutex_lock(mutex);
         session->backend_id = conn->backend_id;
-        pthread_mutex_unlock(mutex);
     }
+
+    pthread_mutex_unlock(mutex);
 
     return conn;
 }
