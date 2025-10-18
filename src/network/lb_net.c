@@ -849,14 +849,24 @@ void* worker_thread_v2(void* arg) {
             } else {
                 // Connection still alive - re-arm EPOLLONESHOT for next event
                 if (wrapper->type == SOCKET_TYPE_CLIENT && conn->client_fd >= 0) {
+                    uint32_t events = EPOLLIN | EPOLLONESHOT;
+                    // Keep EPOLLOUT if there's buffered data to send to client
+                    if (conn->to_client_size > 0) {
+                        events |= EPOLLOUT;
+                    }
                     struct epoll_event ev = {
-                        .events = EPOLLIN | EPOLLONESHOT,
+                        .events = events,
                         .data.ptr = conn->client_wrapper
                     };
                     epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->client_fd, &ev);
                 } else if (wrapper->type == SOCKET_TYPE_BACKEND && conn->backend_fd >= 0) {
+                    uint32_t events = EPOLLIN | EPOLLONESHOT;
+                    // Keep EPOLLOUT if there's buffered data to send to backend
+                    if (conn->to_backend_size > 0) {
+                        events |= EPOLLOUT;
+                    }
                     struct epoll_event ev = {
-                        .events = EPOLLIN | EPOLLONESHOT,
+                        .events = events,
                         .data.ptr = conn->backend_wrapper
                     };
                     epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->backend_fd, &ev);
