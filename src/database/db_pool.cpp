@@ -377,7 +377,9 @@ Backend* DatabasePool::select_replica() {
     return best;
 }
 
-Backend* DatabasePool::get_backend_by_id(uint64_t id) {
+Backend* DatabasePool::get_backend_by_id(uint64_t id) const noexcept {
+    std::shared_lock lock(mutex_);
+
     auto it = std::find_if(backends_.begin(), backends_.end(),
         [id](const std::unique_ptr<Backend>& b) { return b->id() == id; });
 

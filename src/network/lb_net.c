@@ -85,16 +85,15 @@ static void process_cleanup_queue(loadbalancer_t* lb) {
             free(conn->to_client_buffer);
             conn->to_client_buffer = NULL;
         }
-        // DON'T free wrappers - epoll may still have references to them
-        // Small memory leak but prevents use-after-free crashes
-        // if (conn->client_wrapper) {
-        //     free(conn->client_wrapper);
-        //     conn->client_wrapper = NULL;
-        // }
-        // if (conn->backend_wrapper) {
-        //     free(conn->backend_wrapper);
-        //     conn->backend_wrapper = NULL;
-        // }
+        // Free wrappers - safe since FDs are closed and EPOLL_CTL_DEL done
+        if (conn->client_wrapper) {
+            free(conn->client_wrapper);
+            conn->client_wrapper = NULL;
+        }
+        if (conn->backend_wrapper) {
+            free(conn->backend_wrapper);
+            conn->backend_wrapper = NULL;
+        }
         free(conn);
         count++;
     }
@@ -224,15 +223,15 @@ static void lb_net_conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
         free(conn->to_client_buffer);
         conn->to_client_buffer = NULL;
     }
-    // DON'T free wrappers to prevent use-after-free in epoll
-    // if (conn->client_wrapper) {
-    //     free(conn->client_wrapper);
-    //     conn->client_wrapper = NULL;
-    // }
-    // if (conn->backend_wrapper) {
-    //     free(conn->backend_wrapper);
-    //     conn->backend_wrapper = NULL;
-    // }
+    // Free wrappers - safe since FDs are closed and EPOLL_CTL_DEL done
+    if (conn->client_wrapper) {
+        free(conn->client_wrapper);
+        conn->client_wrapper = NULL;
+    }
+    if (conn->backend_wrapper) {
+        free(conn->backend_wrapper);
+        conn->backend_wrapper = NULL;
+    }
     free(conn);
 }
 
@@ -834,15 +833,15 @@ void* worker_thread_v2(void* arg) {
                         free(conn->to_client_buffer);
                         conn->to_client_buffer = NULL;
                     }
-                    // DON'T free wrappers - epoll may still have pointers
-                    // if (conn->client_wrapper) {
-                    //     free(conn->client_wrapper);
-                    //     conn->client_wrapper = NULL;
-                    // }
-                    // if (conn->backend_wrapper) {
-                    //     free(conn->backend_wrapper);
-                    //     conn->backend_wrapper = NULL;
-                    // }
+                    // Free wrappers - safe since FDs are closed and EPOLL_CTL_DEL done
+                    if (conn->client_wrapper) {
+                        free(conn->client_wrapper);
+                        conn->client_wrapper = NULL;
+                    }
+                    if (conn->backend_wrapper) {
+                        free(conn->backend_wrapper);
+                        conn->backend_wrapper = NULL;
+                    }
                     free(conn);
                 }
 

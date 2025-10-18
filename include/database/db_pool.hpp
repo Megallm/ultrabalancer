@@ -174,7 +174,7 @@ public:
 
     [[nodiscard]] std::string get_stats_json() const;
 
-    [[nodiscard]] Backend* get_backend_by_id(uint64_t id);
+    [[nodiscard]] Backend* get_backend_by_id(uint64_t id) const noexcept;
 
 private:
     [[nodiscard]] std::unique_ptr<Connection> create_new_connection(Backend* backend);

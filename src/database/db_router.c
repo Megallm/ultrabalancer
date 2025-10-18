@@ -53,22 +53,31 @@ static db_session_t* db_router_find_session(db_router_t* router, uint64_t sessio
 
 static db_session_t* db_router_create_session(db_router_t* router, uint64_t session_id) {
     if (router->session_count >= router->max_sessions) {
-        time_t oldest_time = time(NULL);
+        time_t oldest_time = 0;
         uint32_t oldest_idx = 0;
         bool found_non_transaction = false;
 
-        // Find oldest session not in transaction
+        // Find the first non-transaction session to initialize baseline
         for (uint32_t i = 0; i < router->session_count; i++) {
-            if (!router->sessions[i].in_transaction &&
-                router->sessions[i].last_activity < oldest_time) {
+            if (!router->sessions[i].in_transaction) {
                 oldest_time = router->sessions[i].last_activity;
                 oldest_idx = i;
                 found_non_transaction = true;
+                break;
             }
         }
 
-        // Always evict oldest session when at max capacity (changed from 300s check)
+        // If we found a non-transaction session, continue to find the oldest one
         if (found_non_transaction) {
+            for (uint32_t i = oldest_idx + 1; i < router->session_count; i++) {
+                if (!router->sessions[i].in_transaction &&
+                    router->sessions[i].last_activity < oldest_time) {
+                    oldest_time = router->sessions[i].last_activity;
+                    oldest_idx = i;
+                }
+            }
+
+            // Always evict oldest session when at max capacity
             router->sessions[oldest_idx].session_id = session_id;
             router->sessions[oldest_idx].backend_id = 0;
             router->sessions[oldest_idx].in_transaction = false;
