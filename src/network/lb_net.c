@@ -68,13 +68,32 @@ static void process_cleanup_queue(loadbalancer_t* lb) {
     lb_connection_t* conn;
     int count = 0;
     while ((conn = cleanup_queue_dequeue(lb->cleanup_queue)) != NULL) {
-        // Free all connection resources
-        free(conn->read_buffer);
-        free(conn->write_buffer);
-        free(conn->to_backend_buffer);
-        free(conn->to_client_buffer);
-        free(conn->client_wrapper);
-        free(conn->backend_wrapper);
+        // Free all connection resources with NULL checks to prevent double-free
+        if (conn->read_buffer) {
+            free(conn->read_buffer);
+            conn->read_buffer = NULL;
+        }
+        if (conn->write_buffer) {
+            free(conn->write_buffer);
+            conn->write_buffer = NULL;
+        }
+        if (conn->to_backend_buffer) {
+            free(conn->to_backend_buffer);
+            conn->to_backend_buffer = NULL;
+        }
+        if (conn->to_client_buffer) {
+            free(conn->to_client_buffer);
+            conn->to_client_buffer = NULL;
+        }
+        // Free wrappers - safe since FDs are closed and EPOLL_CTL_DEL done
+        if (conn->client_wrapper) {
+            free(conn->client_wrapper);
+            conn->client_wrapper = NULL;
+        }
+        if (conn->backend_wrapper) {
+            free(conn->backend_wrapper);
+            conn->backend_wrapper = NULL;
+        }
         free(conn);
         count++;
     }
@@ -174,22 +193,45 @@ static void lb_net_conn_destroy(loadbalancer_t* lb, lb_connection_t* conn) {
     if (conn->client_fd >= 0) {
         epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->client_fd, NULL);
         close(conn->client_fd);
+        conn->client_fd = -1;
     }
     if (conn->backend_fd >= 0) {
         epoll_ctl(lb->epfd, EPOLL_CTL_DEL, conn->backend_fd, NULL);
         close(conn->backend_fd);
+        conn->backend_fd = -1;
     }
 
     if (conn->backend) {
         atomic_fetch_sub(&conn->backend->active_conns, 1);
+        conn->backend = NULL;
     }
 
-    free(conn->read_buffer);
-    free(conn->write_buffer);
-    free(conn->to_backend_buffer);
-    free(conn->to_client_buffer);
-    free(conn->client_wrapper);
-    free(conn->backend_wrapper);
+    // Free buffers and mark as NULL to prevent double-free
+    if (conn->read_buffer) {
+        free(conn->read_buffer);
+        conn->read_buffer = NULL;
+    }
+    if (conn->write_buffer) {
+        free(conn->write_buffer);
+        conn->write_buffer = NULL;
+    }
+    if (conn->to_backend_buffer) {
+        free(conn->to_backend_buffer);
+        conn->to_backend_buffer = NULL;
+    }
+    if (conn->to_client_buffer) {
+        free(conn->to_client_buffer);
+        conn->to_client_buffer = NULL;
+    }
+    // Free wrappers - safe since FDs are closed and EPOLL_CTL_DEL done
+    if (conn->client_wrapper) {
+        free(conn->client_wrapper);
+        conn->client_wrapper = NULL;
+    }
+    if (conn->backend_wrapper) {
+        free(conn->backend_wrapper);
+        conn->backend_wrapper = NULL;
+    }
     free(conn);
 }
 
@@ -218,7 +260,7 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
 
         if (conn->to_backend_size == 0) {
             struct epoll_event ev = {
-                .events = EPOLLIN,
+                .events = EPOLLIN | EPOLLONESHOT,
                 .data.ptr = conn->backend_wrapper
             };
             epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->backend_fd, &ev);
@@ -235,14 +277,15 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
             backend_t* backend = lb_select_backend(lb, &conn->client_addr);
             if (!backend) {
                 fprintf(stderr, "[DEBUG] No backend available\n");
-                return -1;
+                return -1;  // Caller will close connection
             }
 
             conn->backend_fd = lb_net_connect_to_backend(backend);
             if (conn->backend_fd < 0) {
                 fprintf(stderr, "[DEBUG] Failed to connect to backend\n");
                 atomic_fetch_add(&backend->failed_conns, 1);
-                return -1;
+                atomic_fetch_add(&lb->global_stats.failed_requests, 1);
+                return -1;  // Caller will close connection properly
             }
 
             fprintf(stderr, "[DEBUG] Connected to backend fd=%d\n", conn->backend_fd);
@@ -251,11 +294,11 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
             atomic_fetch_add(&backend->active_conns, 1);
             atomic_fetch_add(&backend->total_conns, 1);
 
-            // Register backend socket with epoll (level-triggered)
+            // Register backend socket with epoll using EPOLLONESHOT
             if (conn->backend_wrapper) {
                 conn->backend_wrapper->fd = conn->backend_fd;
                 struct epoll_event ev = {
-                    .events = EPOLLIN,
+                    .events = EPOLLIN | EPOLLONESHOT,
                     .data.ptr = conn->backend_wrapper
                 };
                 if (epoll_ctl(lb->epfd, EPOLL_CTL_ADD, conn->backend_fd, &ev) < 0) {
@@ -297,7 +340,7 @@ int handle_client_to_backend(loadbalancer_t* lb, lb_connection_t* conn) {
             conn->to_backend_size += remaining;
 
             struct epoll_event ev = {
-                .events = EPOLLIN | EPOLLOUT,
+                .events = EPOLLIN | EPOLLOUT | EPOLLONESHOT,
                 .data.ptr = conn->backend_wrapper
             };
             epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->backend_fd, &ev);
@@ -351,7 +394,7 @@ int handle_backend_to_client(loadbalancer_t* lb, lb_connection_t* conn) {
 
         if (conn->to_client_size == 0) {
             struct epoll_event ev = {
-                .events = EPOLLIN,
+                .events = EPOLLIN | EPOLLONESHOT,
                 .data.ptr = conn->client_wrapper
             };
             epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->client_fd, &ev);
@@ -393,7 +436,7 @@ int handle_backend_to_client(loadbalancer_t* lb, lb_connection_t* conn) {
             conn->to_client_size += remaining;
 
             struct epoll_event ev = {
-                .events = EPOLLIN | EPOLLOUT,
+                .events = EPOLLIN | EPOLLOUT | EPOLLONESHOT,
                 .data.ptr = conn->client_wrapper
             };
             epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->client_fd, &ev);
@@ -638,9 +681,9 @@ void* worker_thread_v2(void* arg) {
                         conn->client_wrapper->fd = client_fd;
                     }
 
-                    // Register client socket with epoll (level-triggered for immediate data)
+                    // Register client socket with epoll using EPOLLONESHOT to prevent stale events
                     struct epoll_event ev = {
-                        .events = EPOLLIN,
+                        .events = EPOLLIN | EPOLLONESHOT,
                         .data.ptr = conn->client_wrapper
                     };
 
@@ -676,6 +719,14 @@ void* worker_thread_v2(void* arg) {
             // Validate the connection is still valid
             if (conn->client_fd < 0 && conn->backend_fd < 0) {
                 // Connection was closed, skip this event
+                continue;
+            }
+
+            // Additional check: if this is for a specific FD that's already closed, skip
+            if (wrapper->type == SOCKET_TYPE_CLIENT && conn->client_fd < 0) {
+                continue;
+            }
+            if (wrapper->type == SOCKET_TYPE_BACKEND && conn->backend_fd < 0) {
                 continue;
             }
 
@@ -764,18 +815,62 @@ void* worker_thread_v2(void* arg) {
 
                 // Enqueue for cleanup at the start of next iteration
                 if (!cleanup_queue_enqueue(lb->cleanup_queue, conn)) {
-                    // Queue full, free immediately
+                    // Queue full, free immediately with NULL checks
                     fprintf(stderr, "[WARN] Cleanup queue full, freeing connection immediately\n");
-                    free(conn->read_buffer);
-                    free(conn->write_buffer);
-                    free(conn->to_backend_buffer);
-                    free(conn->to_client_buffer);
-                    free(conn->client_wrapper);
-                    free(conn->backend_wrapper);
+                    if (conn->read_buffer) {
+                        free(conn->read_buffer);
+                        conn->read_buffer = NULL;
+                    }
+                    if (conn->write_buffer) {
+                        free(conn->write_buffer);
+                        conn->write_buffer = NULL;
+                    }
+                    if (conn->to_backend_buffer) {
+                        free(conn->to_backend_buffer);
+                        conn->to_backend_buffer = NULL;
+                    }
+                    if (conn->to_client_buffer) {
+                        free(conn->to_client_buffer);
+                        conn->to_client_buffer = NULL;
+                    }
+                    // Free wrappers - safe since FDs are closed and EPOLL_CTL_DEL done
+                    if (conn->client_wrapper) {
+                        free(conn->client_wrapper);
+                        conn->client_wrapper = NULL;
+                    }
+                    if (conn->backend_wrapper) {
+                        free(conn->backend_wrapper);
+                        conn->backend_wrapper = NULL;
+                    }
                     free(conn);
                 }
 
                 atomic_fetch_sub(&lb->global_stats.active_connections, 1);
+            } else {
+                // Connection still alive - re-arm EPOLLONESHOT for next event
+                if (wrapper->type == SOCKET_TYPE_CLIENT && conn->client_fd >= 0) {
+                    uint32_t events = EPOLLIN | EPOLLONESHOT;
+                    // Keep EPOLLOUT if there's buffered data to send to client
+                    if (conn->to_client_size > 0) {
+                        events |= EPOLLOUT;
+                    }
+                    struct epoll_event ev = {
+                        .events = events,
+                        .data.ptr = conn->client_wrapper
+                    };
+                    epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->client_fd, &ev);
+                } else if (wrapper->type == SOCKET_TYPE_BACKEND && conn->backend_fd >= 0) {
+                    uint32_t events = EPOLLIN | EPOLLONESHOT;
+                    // Keep EPOLLOUT if there's buffered data to send to backend
+                    if (conn->to_backend_size > 0) {
+                        events |= EPOLLOUT;
+                    }
+                    struct epoll_event ev = {
+                        .events = events,
+                        .data.ptr = conn->backend_wrapper
+                    };
+                    epoll_ctl(lb->epfd, EPOLL_CTL_MOD, conn->backend_fd, &ev);
+                }
             }
         }
     }

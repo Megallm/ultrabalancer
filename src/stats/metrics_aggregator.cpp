@@ -104,6 +104,7 @@ void MetricsAggregator::reset_stats() {
     get_or_create("connections.active", Metric::GAUGE);
     get_or_create("bytes.in", Metric::COUNTER);
     get_or_create("bytes.out", Metric::COUNTER);
+    // get_all_metrics().clear();
 }
 
 std::shared_ptr<Metric> MetricsAggregator::get_or_create(const std::string& name,

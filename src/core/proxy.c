@@ -3,6 +3,7 @@
 #include "utils/log.h"
 #include "health/health.h"
 #include "http/http.h"
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
